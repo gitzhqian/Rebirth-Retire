@@ -108,39 +108,7 @@ public:
         }
         return false;
     };
-
-    // pop txn entry from waiter list, if current owner has many parents, not pop
-//    void bring_next() {
-//        LockEntry * entry = waiters_head;
-//        LockEntry * next = NULL;
-//        UInt32 traverse_sz = 0;
-//
-//        // If any waiter can join the owners, just do it!
-//        while (entry) {
-//            if (traverse_sz > waiter_cnt){
-//                break;
-//            }
-//
-//            if (entry->txn == nullptr || entry->txn->status == ABORTED || entry->txn->lock_ready) {
-//                traverse_sz++;
-//                LIST_RMB(waiters_head, waiters_tail, entry);
-//                if (waiter_cnt > 0){
-//                    waiter_cnt --;
-//                }
-//                entry = entry->next;
-//                continue;
-//            }
-//
-//
-//            owner = entry->txn;
-//            LIST_RMB(waiters_head, waiters_tail, entry);
-//            if (waiter_cnt > 0){
-//                waiter_cnt --;
-//            }
-//
-//            break;
-//        }
-//    }
+ 
     void bring_next() {
         LockEntry *entry = waiters_head;
         LockEntry *next = NULL;
@@ -167,10 +135,7 @@ public:
             }
 
             if (entry->type == LOCK_EX) {
-                // todo: still waitting
-//                if (entry->txn->i_dependency_on.size() > 1/g_thread_cnt){
-//
-//                }
+ 
                 if (owner == nullptr) {
                     entry->status = LOCK_OWNER;
                     entry->txn->lock_ready = true;
@@ -384,21 +349,15 @@ public:
             uint64_t thd_id = zeroInDegreeQueue.front();
             zeroInDegreeQueue.pop();
 
-#if !KEY_ORDER
             auto itr = std::find(sortedOrder->begin(), sortedOrder->end(), thd_id);
             if (itr == sortedOrder->end()){
                 sortedOrder->push_back(thd_id);
             }
-#endif
 
             // 遍历该节点的邻居，减少入度
             auto it = adjacencyList->find(thd_id);
             if (it != adjacencyList->end()) {
-#if KEY_ORDER
-                if (sortedOrder->find(thd_id) == sortedOrder->end()){
-                    sortedOrder->insert(thd_id);
-                }
-#endif
+ 
                 for (const auto& dep_txn : *(it->second)) {
                     uint64_t dep_id = dep_txn->get_thd_id(); // 依赖于 thd_id 的事务
 
@@ -450,18 +409,8 @@ public:
 
         if (lower_than_me.size() <= 0) return false;
 
-        bool rebirth = true;
-//        uint32_t children_num = curr_txn->hotspot_friendly_dependency->size();
-//        uint32_t tuple_owner_num = 0;
-//        if (owner) tuple_owner_num++;
-//        double threold = (double)(children_num + tuple_retire_num + tuple_owner_num) / (g_thread_cnt-1);
-////        printf("threold:%f, \n", threold);
-//        if (threold > 0.05){
-//            rebirth = false;
-//        }
 
 #if REBIRTH
-//if (rebirth){
         uint64_t starttimeRB = get_sys_clock();
         //2. use Kahn's algorithm for topologicalSort
         if (curr_txn->status == ABORTED || curr_txn->rr_dependency->empty()) return false;
@@ -472,18 +421,12 @@ public:
         auto *sortedOrder = new std::vector<uint64_t>();
         auto ret1 = topologicalSort(adjacencyList, sortedOrder);
         if (ret1){
-//#if PF_CS
-//            uint64_t time_wound = get_sys_clock();
-//#endif
             curr_txn->set_abort();
 #if PF_CS
 //            INC_STATS(curr_txn->get_thd_id(), time_wound, get_sys_clock() - time_wound);
             INC_STATS(curr_txn->get_thd_id(), find_circle_abort_depent, 1);
             INC_STATS(curr_txn->get_thd_id(), time_rebirth,  get_sys_clock() - starttimeRB);
 #endif
-//#if PF_ABORT
-//            curr_txn->wound = true;
-//#endif
             return true;
         }
 
@@ -492,7 +435,7 @@ public:
         auto size_sort = sortedOrder->size();
         bool find = false;
         int find_idx = 0;
-#if KEY_ORDER == false
+ 
         if (size_dep > 0){
             for (int i = size_dep - 1; i >= 0; --i){
                 auto dep_txn_o=lower_than_me[i];
@@ -501,9 +444,6 @@ public:
                         curr_txn->wound_txn(dep_txn_o);
 //#if PF_CS
 //                        INC_STATS(curr_txn->get_thd_id(), find_circle_abort_depent, 1);
-//#endif
-//#if PF_ABORT
-//                        dep_txn_o->wound = true;
 //#endif
                     }else{
                         for (int j = 0; j < size_sort; ++j) {
@@ -514,9 +454,6 @@ public:
 //#if PF_CS
 //                                INC_STATS(curr_txn->get_thd_id(), find_circle_abort_depent, 1);
 //#endif
-//#if PF_ABORT
-//                        dep_txn_o->wound = true;
-//#endif
                             }
                         }
                     }
@@ -524,7 +461,7 @@ public:
             }
 
         }
-#endif
+ 
 
         // 3. do rebirth, update my children' ts
 #if NEXT_TS
@@ -582,7 +519,6 @@ public:
         }
         return false;
 #else
-//     } else {
         auto size_dep = lower_than_me.size();
         for (int i = 0; i > size_dep; ++i) {
             auto dep_txn_o = lower_than_me[i];
@@ -592,8 +528,6 @@ public:
         }
 
         return false;
-//     }
-
 #endif
 
     }
