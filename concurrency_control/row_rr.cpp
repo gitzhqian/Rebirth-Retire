@@ -375,38 +375,8 @@ RC Row_rr::access(txn_man * txn, TsType type, Access * access){
         return rc;
     }
 
-    //no retire
-    bool retire = true;
-    if (!retire){
-        if (wait && !retire){
-            while (version_header->retire != nullptr){
-                PAUSE
-            }
-            if (txn->status == ABORTED){
-                rc = Abort;
-                return rc;
-            }
-            if (type == P_REQ) {
-                access->old_version = version_header;
-                new_version->next = version_header;
-                new_version->retire = txn;
-                new_version->dynamic_txn_ts = (volatile ts_t *)&txn->timestamp;
-                new_version->type = WR;
-#if ABORT_OPTIMIZATION
-                new_version->version_number = version_header->version_number + CHAIN_NUMBER_ADD_ONE;
-#endif
-                version_header->prev = new_version;
-                version_header = new_version;
-                assert(version_header->end_ts == INF);
-                access->tuple_version = new_version;
-            }
-        }
-
-        return rc;
-    }
-
-
-    //otherwise retire, wait for lock
+ 
+    //wait for lock, then retire
     uint64_t start_wait = get_sys_clock();
     while (true){
         if (txn->lock_ready){
@@ -454,6 +424,7 @@ RC Row_rr::access(txn_man * txn, TsType type, Access * access){
         return rc;
     }
 
+    
     uint64_t startt_retire = get_sys_clock();
     lock_row(txn);
     COMPILER_BARRIER
