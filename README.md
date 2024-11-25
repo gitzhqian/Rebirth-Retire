@@ -1,6 +1,6 @@
 DBx1000 Rebirth-Retire
 ==============
-The repository is built on DBx1000: https://github.com/yxymit/DBx1000 https://github.com/ScarletGuo/Bamboo-Public 
+The repository is built on DBx1000: https://github.com/yxymit/DBx1000 https://github.com/ScarletGuo/Bamboo-Public   
 
     Staring into the Abyss: An Evaluation of Concurrency Control with One Thousand Cores
     Xiangyao Yu, George Bezerra, Andrew Pavlo, Srinivas Devadas, Michael Stonebraker
