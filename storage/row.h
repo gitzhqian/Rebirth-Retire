@@ -36,6 +36,7 @@ class Row_silo;
 class Row_vll;
 class Row_ww;
 class Row_bamboo;
+class Row_rr;
 //class Row_bamboo_pt;
 class Row_ic3;
 #if CC_ALG == WOUND_WAIT || CC_ALG == WAIT_DIE || CC_ALG == NO_WAIT || CC_ALG == DL_DETECT
@@ -46,7 +47,7 @@ struct BBLockEntry;
 
 class row_t
 {
-  public:
+public:
 
     RC init(table_t * host_table, uint64_t part_id, uint64_t row_id = 0);
     void init(int size);
@@ -104,7 +105,8 @@ class row_t
     void init_accesses(Access * access);
     Access * txn_access; // only used when row is a local copy
 #endif
-    RC get_row(access_t type, txn_man * txn, row_t *& row, Access *access=NULL);
+    RC get_row(access_t type, txn_man * txn, row_t *& row, Access * access=NULL);
+//    RC get_row(access_t type, txn_man * txn, row_t *& row, Access *& access);
 #if CC_ALG == BAMBOO
     void return_row(BBLockEntry * lock_entry, RC rc);
 #elif CC_ALG == WOUND_WAIT
@@ -137,12 +139,15 @@ class row_t
 	Row_bamboo * manager;
   #elif CC_ALG == IC3
 	Row_ic3 * manager;
+  #elif CC_ALG == REBIRTH_RETIRE
+	Row_rr * manager;
 #endif
     char * data;
     table_t * table;
-  private:
+private:
     // primary key should be calculated from the data stored in the row.
     uint64_t 		_primary_key;
     uint64_t		_part_id;
-    uint64_t 		_row_id;
+    uint64_t 		_row_id;                // equal to get_sys_clock() [can't be used to uniquely identify a tuple]
 };
+

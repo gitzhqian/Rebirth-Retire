@@ -1,4 +1,4 @@
-#pragma once 
+#pragma once
 
 #include <cstdlib>
 #include <iostream>
@@ -108,7 +108,14 @@
 	if (en->prev) en->prev->next = en->next; \
 	else if (head == en) {	head = en->next; } \
 	if (tail == en)	{ tail = en->prev; } \
-	cnt--; } \
+	if (cnt >0) cnt--; }      \
+
+#define LIST_RMB(head, tail, en) { \
+	if (en->next) en->next->prev = en->prev; \
+	if (en->prev) en->prev->next = en->next; \
+	else if (head == en) {	head = en->next; } \
+	if (tail == en)	{ tail = en->prev; } \
+}
 
 #define LIST_RM_SINCE(head, tail, en) { \
 	if (en->prev) en->prev->next = NULL; \
@@ -194,19 +201,19 @@ enum Data_type {DT_table, DT_page, DT_row };
 // data item type. 
 class itemid_t {
 public:
-	itemid_t() { };
-	itemid_t(Data_type type, void * loc) {
+    itemid_t() { };
+    itemid_t(Data_type type, void * loc) {
         this->type = type;
         this->location = loc;
     };
-	Data_type type;
-	void * location; // points to the table | page | row
-	itemid_t * next;
-	bool valid;
-	void init();
-	bool operator==(const itemid_t &other) const;
-	bool operator!=(const itemid_t &other) const;
-	void operator=(const itemid_t &other);
+    Data_type type;
+    void * location; // points to the table | page | row
+    itemid_t * next;
+    bool valid;
+    void init();
+    bool operator==(const itemid_t &other) const;
+    bool operator!=(const itemid_t &other) const;
+    void operator=(const itemid_t &other);
 };
 
 int get_thdid_from_txnid(uint64_t txnid);
@@ -228,9 +235,9 @@ inline uint64_t get_server_clock() {
     unsigned hi, lo;
     __asm__ __volatile__ ("rdtsc" : "=a"(lo), "=d"(hi));
     uint64_t ret = ( (uint64_t)lo)|( ((uint64_t)hi)<<32 );
-	ret = (uint64_t) ((double)ret / CPU_FREQ);
-#else 
-	timespec * tp = new timespec;
+    ret = (uint64_t) ((double)ret / CPU_FREQ);
+#else
+    timespec * tp = new timespec;
     clock_gettime(CLOCK_REALTIME, tp);
     uint64_t ret = tp->tv_sec * 1000000000 + tp->tv_nsec;
 #endif
@@ -239,41 +246,41 @@ inline uint64_t get_server_clock() {
 
 inline uint64_t get_sys_clock() {
 #ifndef NOGRAPHITE
-	static volatile uint64_t fake_clock = 0;
+    static volatile uint64_t fake_clock = 0;
 	if (warmup_finish)
 		return CarbonGetTime();   // in ns
 	else {
 		return ATOM_ADD_FETCH(fake_clock, 100);
 	}
 #else
-  #if TIME_ENABLE
-	return get_server_clock();
-  #else
-	return 0;
-  #endif
+#if TIME_ENABLE
+    return get_server_clock();
+#else
+    return 0;
+#endif
 #endif
 }
 class myrand {
 public:
-	void init(uint64_t seed);
-	uint64_t next();
+    void init(uint64_t seed);
+    uint64_t next();
 private:
-	uint64_t seed;
+    uint64_t seed;
 };
 
 inline void set_affinity(uint64_t thd_id) {
-	return;
-	/*
-	// TOOD. the following mapping only works for swarm
-	// which has 4-socket, 10 physical core per socket, 
-	// 80 threads in total with hyper-threading
-	uint64_t a = thd_id % 40;
-	uint64_t processor_id = a / 10 + (a % 10) * 4;
-	processor_id += (thd_id / 40) * 40;
-	
-	cpu_set_t  mask;
-	CPU_ZERO(&mask);
-	CPU_SET(processor_id, &mask);
-	sched_setaffinity(0, sizeof(cpu_set_t), &mask);
-	*/
+    return;
+    /*
+    // TOOD. the following mapping only works for swarm
+    // which has 4-socket, 10 physical core per socket,
+    // 80 threads in total with hyper-threading
+    uint64_t a = thd_id % 40;
+    uint64_t processor_id = a / 10 + (a % 10) * 4;
+    processor_id += (thd_id / 40) * 40;
+
+    cpu_set_t  mask;
+    CPU_ZERO(&mask);
+    CPU_SET(processor_id, &mask);
+    sched_setaffinity(0, sizeof(cpu_set_t), &mask);
+    */
 }

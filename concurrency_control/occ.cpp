@@ -6,7 +6,7 @@
 #include "mem_alloc.h"
 #include "row_occ.h"
 
-
+#if CC_ALG != REBIRTH_RETIRE
 set_ent::set_ent() {
 	set_size = 0;
 	txn = NULL;
@@ -205,3 +205,4 @@ bool OptCC::test_valid(set_ent * set1, set_ent * set2) {
 		}
 	return true;
 }
+#endif

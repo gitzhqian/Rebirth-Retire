@@ -4,6 +4,13 @@
 #include "mem_alloc.h"
 #include "manager.h"
 
+#if BB_TRACK_DEPENDENS
+// 创建随机数引擎
+std::mt19937 gen(std::random_device{}());  // 程序启动时创建一次随机数生成器
+std::uniform_real_distribution<> dis(0.0, 1.0);  // 定义均匀分布
+#endif
+
+//#if CC_ALG == BAMBOO
 void Row_bamboo::init(row_t * row) {
     _row = row;
     // owners contains at most one lock entry, whose type is always LOCK_EX
@@ -32,35 +39,35 @@ void Row_bamboo::init(row_t * row) {
 // taking the latch
 void Row_bamboo::lock(txn_man * txn) {
     if (likely(g_thread_cnt > 1)) {
-            if (unlikely(g_central_man))
-                glob_manager->lock_row(_row);
-            else {
+        if (unlikely(g_central_man))
+            glob_manager->lock_row(_row);
+        else {
 #if LATCH == LH_SPINLOCK
-               pthread_spin_lock( latch );
+            pthread_spin_lock( latch );
 #elif LATCH == LH_MUTEX
-                pthread_mutex_lock( latch );
+            pthread_mutex_lock( latch );
 #else
                 latch->acquire(txn->mcs_node);
 #endif
-            }
+        }
     }
 };
 
 // release the latch
 void Row_bamboo::unlock(txn_man * txn) {
-        if (likely(g_thread_cnt > 1)) {
-            if (unlikely(g_central_man))
-                glob_manager->release_row(_row);
-            else {
+    if (likely(g_thread_cnt > 1)) {
+        if (unlikely(g_central_man))
+            glob_manager->release_row(_row);
+        else {
 #if LATCH == LH_SPINLOCK
-                pthread_spin_unlock( latch );
+            pthread_spin_unlock( latch );
 #elif LATCH == LH_MUTEX
-                pthread_mutex_unlock( latch );
+            pthread_mutex_unlock( latch );
 #else
                 latch->release(txn->mcs_node);
 #endif
-            }
         }
+    }
 };
 
 // Return value: RCOK/FINISH/WAIT/Abort
@@ -69,6 +76,9 @@ void Row_bamboo::unlock(txn_man * txn) {
 // - WAIT: added to wait list but not acquired the data
 // - Abort: aborted
 RC Row_bamboo::lock_get(lock_t type, txn_man * txn, Access * access) {
+#if BB_TRACK_DEPENDENS
+    double random_val = dis(gen);
+#endif
     // init return value
     RC rc = RCOK;
     // iterating helper
@@ -87,13 +97,16 @@ RC Row_bamboo::lock_get(lock_t type, txn_man * txn, Access * access) {
     COMPILER_BARRIER
 #if PF_CS
     uint64_t endtime = get_sys_clock();
-    INC_STATS(txn->get_thd_id(), time_get_latch, endtime - starttime);
+    uint64_t timespan = endtime - starttime;
+    INC_STATS(txn->get_thd_id(), time_get_latch, timespan);
+    txn->wait_latch_time = txn->wait_latch_time + timespan;
     starttime = endtime;
 #endif
     // timestamp
     ts_t ts = 0;
     ts_t owner_ts = 0;
     ts_t en_ts;
+
 #if !BB_DYNAMIC_TS
     // [pre-assigned ts] assign ts if does not have one
     if (ts == 0) {
@@ -101,11 +114,12 @@ RC Row_bamboo::lock_get(lock_t type, txn_man * txn, Access * access) {
         ts = txn->get_ts();
     }
 #endif
+
     if (type == LOCK_SH) {
         // if read, decide if need to wait
         // need_to_wait(): ts > owner & owner is write.
         if (owners) {
-			owner_ts = owners->txn->get_ts();
+            owner_ts = owners->txn->get_ts();
 #if BB_DYNAMIC_TS
             // the only writer in owner may be unassigned
             owner_ts = assign_ts(owner_ts, owners->txn);
@@ -114,26 +128,54 @@ RC Row_bamboo::lock_get(lock_t type, txn_man * txn, Access * access) {
 #endif
             if (a_higher_than_b(owner_ts, ts)) { // owner has higher priority
                 // add to waiters
-				add_to_waiters(ts, to_insert);
-				rc = WAIT;
+                add_to_waiters(ts, to_insert);
+                rc = WAIT;
                 goto final; // since owner is blocking others
             } else { // ts has higher priority than owner
 #if BB_OPT_RAW
                 // if has any retired, retired must have ts since there's owner
-				rc = insert_read_to_retired(to_insert, ts, access);
-				goto final;
+                uint64_t readretiretime = get_sys_clock();
+#if PF_CS
+                INC_STATS(txn->get_thd_id(), time_get_cs, get_sys_clock() - starttime);
+#endif
+                rc = insert_read_to_retired(to_insert, ts, access);
+#if PF_CS
+                INC_STATS(txn->get_thd_id(), time_retire_cs, get_sys_clock() - readretiretime);
+                starttime = readretiretime;
+#endif
+#if PF_ABORT && RETIRE_TEST
+                if (random_val < SAMPLE_PROBABILITY) {
+                    // 符合采样条件，将数据插入到 wound 缓冲区
+                    auto timespan = get_sys_clock() - txn->start_sys_clock;
+                    uint32_t i_depend =0;
+                    uint32_t depent =0;
+#if BB_TRACK_DEPENDENS
+                    i_depend = txn->i_depend_set->size();
+                    depent =  txn->dependend_on_me->size();
+#endif
+                    auto access_cnt = txn->row_cnt;
+                    std::string ss;
+                    ss = "RET=tim:" + std::to_string(timespan) + ",tdid:" + std::to_string( txn->get_thd_id()) +
+                         ",tnid:" + std::to_string( txn->get_txn_id()) + ",acc:" + std::to_string(access_cnt) + ",dpd:" + std::to_string(i_depend) +
+                         ",dpt:" + std::to_string(depent) + ",R:" + std::to_string(this->retired_cnt) +
+                         ",W:" + std::to_string(this->waiter_cnt) + ",O:" +std::to_string(1);
+                    txn->insert_wound(ss);
+                }
+#endif
+
+                goto final;
 #else
                 // wound and add to waiters (rc=WAIT)
                 if (wound_retired_rd(ts, to_insert) == Abort) {
-					rc = Abort;
-					goto final;
-				}
+                    rc = Abort;
+                    goto final;
+                }
                 // wound owners
                 if (wound_owner(to_insert) == Abort) {
-					rc = Abort;
-					goto final;
-				}
-				add_to_waiters(ts, to_insert);		
+                    rc = Abort;
+                    goto final;
+                }
+                add_to_waiters(ts, to_insert);
                 rc = WAIT;
 #endif
             }
@@ -151,34 +193,61 @@ RC Row_bamboo::lock_get(lock_t type, txn_man * txn, Access * access) {
                         // assign retired head and assign self
                         assign_ts(0, retired_tail->txn);
                         ts = assign_ts(ts, txn);
-                    } 
+                    }
                     // else, case 2: [RRR][][] / [RRR][][W]
                     // all reads, then no need for ts. only case to have self=0
                 } else {
-                    // case 1: [RW] 
-                    // case 3: [WR] 
-                    // case 2: [WW] 
+                    // case 1: [RW]
+                    // case 3: [WR]
+                    // case 2: [WW]
                     // retire list all assigned, need to assign self
                     ts = assign_ts(ts, txn);
                 }
             }
 #endif
 #if BB_OPT_RAW
-			// no owners, if waiters_head has higher priority, then wait. 
-			if (waiters_head && a_higher_than_b(waiters_head->txn->get_ts(), ts)) {
-				add_to_waiters(ts, to_insert);
-				rc = WAIT;
-			} else {
-				// else, insert to retired list
-				rc = insert_read_to_retired(to_insert, ts, access);
-			}
-			goto final;
+            // no owners, if waiters_head has higher priority, then wait.
+            if (waiters_head && a_higher_than_b(waiters_head->txn->get_ts(), ts)) {
+                add_to_waiters(ts, to_insert);
+                rc = WAIT;
+            } else {
+                // else, insert to retired list
+                uint64_t readretiretime = get_sys_clock();
+#if PF_CS
+                INC_STATS(txn->get_thd_id(), time_get_cs, get_sys_clock() - starttime);
+#endif
+                rc = insert_read_to_retired(to_insert, ts, access);
+#if PF_CS
+                INC_STATS(txn->get_thd_id(), time_retire_cs, get_sys_clock() - readretiretime);
+                starttime = readretiretime;
+#endif
+#if PF_ABORT && RETIRE_TEST
+                if (random_val < SAMPLE_PROBABILITY) {
+                    // 符合采样条件，将数据插入到 wound 缓冲区
+                    auto timespan = get_sys_clock() - txn->start_sys_clock;
+                    uint32_t i_depend =0;
+                    uint32_t depent =0;
+#if BB_TRACK_DEPENDENS
+                    i_depend = txn->i_depend_set->size();
+                    depent =  txn->dependend_on_me->size();
+#endif
+                    auto access_cnt = txn->row_cnt;
+                    std::string ss;
+                    ss = "RET=tim:" + std::to_string(timespan) + ",tdid:" + std::to_string( txn->get_thd_id()) +
+                         ",tnid:" + std::to_string( txn->get_txn_id()) + ",acc:" + std::to_string(access_cnt) + ",dpd:" + std::to_string(i_depend) +
+                         ",dpt:" + std::to_string(depent) + ",R:" + std::to_string(this->retired_cnt) +
+                         ",W:" + std::to_string(this->waiter_cnt) + ",O:" +std::to_string(1);
+                    txn->insert_wound(ss);
+                }
+#endif
+            }
+            goto final;
 #else
             // no owner, wound and add to retired (rc=RCOK)
             if (wound_retired_rd(ts, to_insert) == Abort) {
-				rc = Abort;
-				goto final;
-			}
+                rc = Abort;
+                goto final;
+            }
             UPDATE_RETIRE_INFO(to_insert, retired_tail);
             ADD_TO_RETIRED_TAIL(to_insert);
 #if PF_CS
@@ -196,7 +265,24 @@ RC Row_bamboo::lock_get(lock_t type, txn_man * txn, Access * access) {
             owners = to_insert;
             owners->status = LOCK_OWNER;
             owners->txn->lock_ready = true;
-            UPDATE_RETIRE_INFO(to_insert, retired_tail);
+            UPDATE_RETIRE_INFO(to_insert, retired_tail );
+#if BB_TRACK_DEPENDENS
+            if (retired_tail != nullptr && retired_tail->txn != nullptr){
+                if (retired_tail->type == LOCK_EX){
+                    to_insert->txn->i_depend_set->insert(retired_tail->txn->get_txn_id());  //to_insert->retired_tail
+                }
+                retired_tail->txn->dependend_on_me->insert(to_insert->txn->get_txn_id());
+            }
+#endif
+#if TEST_BB_ABORT
+            if (retired_tail && txn != nullptr) {
+                retired_tail->txn->PushDependency(txn, txn->get_txn_id(), DepType::WRITE_WRITE_);
+                if(retired_tail->txn->status == RUNNING) {
+                    txn->UnionWaitingSet(retired_tail->txn->bb_waiting);
+                }
+            }
+#endif
+
 #if PF_CS
             INC_STATS(txn->get_thd_id(), time_get_cs, get_sys_clock() - starttime);
 #endif
@@ -235,18 +321,18 @@ RC Row_bamboo::lock_get(lock_t type, txn_man * txn, Access * access) {
                 } // else [][][] -> no need to assign self
             }
         } else {
-			// self is assigned but txns in the list may not be assigned
-			// three cases of where things are not assigned: 
-			// case 1: [R][][], reads must be killed. 
-			// case 2: [W][][], write must be killed
-			// case 3: [][W][], write must be killed
-			// must be handled by the follow that if unassigned must be killed
-		}
+            // self is assigned but txns in the list may not be assigned
+            // three cases of where things are not assigned:
+            // case 1: [R][][], reads must be killed.
+            // case 2: [W][][], write must be killed
+            // case 3: [][W][], write must be killed
+            // must be handled by the follow that if unassigned must be killed
+        }
 #endif
         // wound retired
         if (wound_retired_wr(ts, to_insert) == Abort) {
-              rc = Abort;
-              goto final;
+            rc = Abort;
+            goto final;
         }
         // wound owners
         if (owners && (owner_ts == 0 || a_higher_than_b(ts, owner_ts))) {
@@ -268,13 +354,16 @@ RC Row_bamboo::lock_get(lock_t type, txn_man * txn, Access * access) {
     } else {
         goto final;
     }
-final:
+
+    final:
 #if DEBUG_BAMBOO
-	assert(((rc == WAIT) == (!txn->lock_ready)) || rc == Abort);
+    assert(((rc == WAIT) == (!txn->lock_ready)) || rc == Abort);
 	check_correctness();
 #endif
 #if PF_CS
-    INC_STATS(txn->get_thd_id(), time_get_cs, get_sys_clock() - starttime);
+    uint64_t timespan1 = get_sys_clock() - starttime;
+    INC_STATS(txn->get_thd_id(), time_get_cs, timespan1);
+    txn->wait_latch_time = txn->wait_latch_time + timespan1;
 #endif
     // release the latch
     COMPILER_BARRIER
@@ -286,6 +375,10 @@ final:
 
 RC Row_bamboo::lock_retire(BBLockEntry * entry) {
     ASSERT(entry->type == LOCK_EX);
+#if BB_TRACK_DEPENDENS
+    // 随机采样过程
+    double random_val = dis(gen);
+#endif
 #if PF_CS
     uint64_t starttime = get_sys_clock();
 #endif
@@ -293,7 +386,9 @@ RC Row_bamboo::lock_retire(BBLockEntry * entry) {
     COMPILER_BARRIER
 #if PF_CS
     uint64_t endtime = get_sys_clock();
-    INC_STATS(entry->txn->get_thd_id(), time_retire_latch, endtime - starttime);
+    uint64_t timespan2 = endtime - starttime;
+    INC_STATS(entry->txn->get_thd_id(), time_retire_latch, timespan2);
+    entry->txn->wait_latch_time = entry->txn->wait_latch_time + timespan2;
     starttime = endtime;
 #endif
     RC rc = RCOK;
@@ -301,14 +396,37 @@ RC Row_bamboo::lock_retire(BBLockEntry * entry) {
     if (entry->status == LOCK_OWNER) {
         // move to retired list
         RETIRE_ENTRY(entry);
+
+#if PF_ABORT && RETIRE_TEST
+        if (random_val < SAMPLE_PROBABILITY) {
+            // 符合采样条件，将数据插入到 wound 缓冲区
+            auto timespan = get_sys_clock() - entry->txn->start_sys_clock;
+            uint32_t i_depend =0;
+            uint32_t depent =0;
+#if BB_TRACK_DEPENDENS
+            i_depend = entry->txn->i_depend_set->size();
+            depent = entry->txn->dependend_on_me->size();
+#endif
+            auto access_cnt = entry->txn->row_cnt;
+            std::string ss;
+            ss = "RET=tim:" + std::to_string(timespan) + ",tdid:" + std::to_string(entry->txn->get_thd_id()) +
+                 ",tnid:" + std::to_string(entry->txn->get_txn_id()) + ",acc:" + std::to_string(access_cnt) + ",dpd:" + std::to_string(i_depend) +
+                 ",dpt:" + std::to_string(depent) + ",R:" + std::to_string(this->retired_cnt) +
+                 ",W:" + std::to_string(this->waiter_cnt) + ",O:" +std::to_string(1);
+            entry->txn->insert_wound(ss);
+        }
+#endif
+
         // make dirty data globally visible
         if (entry->type == LOCK_EX) {
 #if PF_CS
             uint64_t startt = get_sys_clock();
+#endif
             entry->access->orig_row->copy(entry->access->data);
-            INC_STATS(entry->txn->get_thd_id(), time_copy, get_sys_clock() - startt);
-#else
-            entry->access->orig_row->copy(entry->access->data);
+#if PF_CS
+            uint64_t copyspan = get_sys_clock() - startt;
+            INC_STATS(entry->txn->get_thd_id(), time_copy_latch, copyspan);
+
 #endif
         }
     } else {
@@ -319,8 +437,9 @@ RC Row_bamboo::lock_retire(BBLockEntry * entry) {
     bring_next(NULL);
 
 #if PF_CS
-    INC_STATS(entry->txn->get_thd_id(), time_retire_cs, get_sys_clock() -
-    starttime);
+    uint64_t timespan3 = get_sys_clock() - starttime;
+    INC_STATS(entry->txn->get_thd_id(), time_retire_cs, timespan3);
+    entry->txn->wait_latch_time = entry->txn->wait_latch_time + timespan3;
 #endif
     COMPILER_BARRIER
     unlock(entry->txn);
@@ -328,9 +447,9 @@ RC Row_bamboo::lock_retire(BBLockEntry * entry) {
 }
 
 RC Row_bamboo::lock_release(BBLockEntry * entry, RC rc) {
-	if (entry->status == LOCK_DROPPED)
-	    return RCOK;
-#if PF_ABORT 
+    if (entry->status == LOCK_DROPPED)
+        return RCOK;
+#if PF_ABORT
     entry->txn->abort_chain = 0;
 #endif
 #if PF_CS
@@ -340,7 +459,9 @@ RC Row_bamboo::lock_release(BBLockEntry * entry, RC rc) {
     COMPILER_BARRIER
 #if PF_CS
     uint64_t endtime = get_sys_clock();
-    INC_STATS(entry->txn->get_thd_id(), time_release_latch, endtime- starttime);
+    uint64_t timespan4 = endtime- starttime;
+    INC_STATS(entry->txn->get_thd_id(), time_release_latch, timespan4);
+    entry->txn->wait_latch_time = entry->txn->wait_latch_time + timespan4;
     starttime = endtime;
 #endif
     // if in retired
@@ -351,16 +472,16 @@ RC Row_bamboo::lock_release(BBLockEntry * entry, RC rc) {
         // not found in retired, need to make globally visible if rc = commit
         if (rc == RCOK && (entry->type == LOCK_EX)) {
 #if PF_CS
-                uint64_t startt = get_sys_clock();
-                entry->access->orig_row->copy(entry->access->data);
-                INC_STATS(entry->txn->get_thd_id(), time_copy, get_sys_clock() - startt);
-#else
-                entry->access->orig_row->copy(entry->access->data);
+            uint64_t copy_time = get_sys_clock();
+#endif
+            entry->access->orig_row->copy(entry->access->data);
+#if PF_CS
+            INC_STATS(entry->txn->get_thd_id(), time_copy_latch, get_sys_clock() - copy_time);
 #endif
         }
     } else if (entry->status == LOCK_WAITER) {
-#if DEBUG_BAMBOO 
-		UInt32 cnt = 0;
+#if DEBUG_BAMBOO
+        UInt32 cnt = 0;
 		BBLockEntry * en = waiters_head;
 		bool found = false;
 		while(en) {
@@ -376,10 +497,11 @@ RC Row_bamboo::lock_release(BBLockEntry * entry, RC rc) {
         LIST_RM(waiters_head, waiters_tail, entry, waiter_cnt);
 		assert(waiter_cnt == cnt-1);
 #else
+
         LIST_RM(waiters_head, waiters_tail, entry, waiter_cnt);
 #endif
     } else {
-		// already removed
+        // already removed
     }
     return_entry(entry);
     if (!owners) {
@@ -389,17 +511,18 @@ RC Row_bamboo::lock_release(BBLockEntry * entry, RC rc) {
     // WAIT - done releasing with is_abort = true
     // FINISH - done releasing with is_abort = false
 #if PF_CS
-    INC_STATS(entry->txn->get_thd_id(), time_release_cs, get_sys_clock() -
-  starttime);
+    uint64_t timespan5 =  get_sys_clock() -  starttime;
+    INC_STATS(entry->txn->get_thd_id(), time_release_cs, timespan5);
+    entry->txn->wait_latch_time =  entry->txn->wait_latch_time + timespan5;
 #endif
     COMPILER_BARRIER
     unlock(entry->txn);
-#if PF_ABORT 
+#if PF_ABORT
     if (entry->txn->abort_chain > 0) {
-    UPDATE_STATS(entry->txn->get_thd_id(), max_abort_length, entry->txn->abort_chain);
-    INC_STATS(entry->txn->get_thd_id(), cascading_abort_times, 1);
-    INC_STATS(entry->txn->get_thd_id(), abort_length, entry->txn->abort_chain);
-  }
+        UPDATE_STATS(entry->txn->get_thd_id(), max_abort_length, entry->txn->abort_chain);
+        INC_STATS(entry->txn->get_thd_id(), cascading_abort_times, 1);
+        INC_STATS(entry->txn->get_thd_id(), abort_length, entry->txn->abort_chain);
+    }
 #endif
     return RCOK;
 }
@@ -416,10 +539,11 @@ bool Row_bamboo::bring_next(txn_man * txn) {
 #if BB_AUTORETIRE
     bool retired_has_write = (retired_tail && (retired_tail->type == LOCK_EX || !retired_tail->is_cohead));
 #endif
+
     // If any waiter can join the owners, just do it
     while (entry) {
-		// XXX(zhihan): entry may not be waiters_head 
-		next = entry->next;
+        // XXX(zhihan): entry may not be waiters_head
+        next = entry->next;
         if (!owners) {
             if (entry->type == LOCK_EX) { // !owners
 #if BB_AUTORETIRE
@@ -428,7 +552,25 @@ bool Row_bamboo::bring_next(txn_man * txn) {
                 // add to owners
                 owners = entry;
                 entry->status = LOCK_OWNER;
-                UPDATE_RETIRE_INFO(owners, retired_tail);
+                UPDATE_RETIRE_INFO(owners, retired_tail );
+
+#if BB_TRACK_DEPENDENS
+                if (retired_tail != nullptr && retired_tail->txn != nullptr){
+                    if (retired_tail->type == LOCK_EX){
+                        owners->txn->i_depend_set->insert(retired_tail->txn->get_txn_id());  //owners->retired_tail
+                    }
+                    retired_tail->txn->dependend_on_me->insert(owners->txn->get_txn_id());
+                }
+#endif
+#if TEST_BB_ABORT
+                if (retired_tail && entry->txn != nullptr) {
+                    retired_tail->txn->PushDependency(entry->txn, entry->txn->get_txn_id(), DepType::WRITE_WRITE_);
+                    if(retired_tail->txn->status == RUNNING) {
+                        entry->txn->UnionWaitingSet(retired_tail->txn->bb_waiting);
+                    }
+                }
+#endif
+
                 has_txn = bring_out_waiter(entry, txn);
 #endif
                 break;
@@ -437,12 +579,28 @@ bool Row_bamboo::bring_next(txn_man * txn) {
                 printf("ERROR: not support AUTORETIRE yet\n");
 #else
                 // add to retired
-                UPDATE_RETIRE_INFO(entry, retired_tail);
+                UPDATE_RETIRE_INFO(entry, retired_tail );
+#if BB_TRACK_DEPENDENS
+                if (retired_tail != nullptr && retired_tail->txn != nullptr ){
+                    if (retired_tail->type == LOCK_EX){
+                        entry->txn->i_depend_set->insert(retired_tail->txn->get_txn_id());  //entry->retired_tail
+                    }
+                    retired_tail->txn->dependend_on_me->insert(entry->txn->get_txn_id());
+                }
+#endif
+#if TEST_BB_ABORT
+                if (retired_tail && retired_tail->type != LOCK_SH && entry->txn != nullptr) {
+                    retired_tail->txn->PushDependency(entry->txn, entry->txn->get_txn_id(), DepType::WRITE_READ_);
+                    if(retired_tail->txn->status == RUNNING) {
+                        entry->txn->UnionWaitingSet(retired_tail->txn->bb_waiting);
+                    }
+                }
+#endif
                 has_txn = bring_out_waiter(entry, txn);
                 ADD_TO_RETIRED_TAIL(entry);
 #endif
             }
-			entry = next;
+            entry = next;
         } else
             break; // no promotable waiters
     }
@@ -458,7 +616,14 @@ bool Row_bamboo::bring_next(txn_man * txn) {
 inline
 BBLockEntry * Row_bamboo::rm_from_retired(BBLockEntry * en, bool is_abort, txn_man * txn) {
     if (is_abort && (en->type == LOCK_EX)) {
+#if PF_CS
+        uint64_t copy_time = get_sys_clock();
+#endif
         CHECK_ROLL_BACK(en); // roll back only for the first-conflicting-write
+#if PF_CS
+        INC_STATS(en->txn->get_thd_id(), time_copy_latch,  get_sys_clock() - copy_time);
+#endif
+
         en->txn->lock_abort = true;
         en = remove_descendants(en, txn);
         return en;
@@ -466,7 +631,7 @@ BBLockEntry * Row_bamboo::rm_from_retired(BBLockEntry * en, bool is_abort, txn_m
         BBLockEntry * next = en->next;
         update_entry(en);
         if (retired_cnt == 0)
-          printf("error!\n");
+            printf("error!\n");
         LIST_RM(retired_head, retired_tail, en, retired_cnt);
         return_entry(en);
         return next;
@@ -479,7 +644,7 @@ BBLockEntry * Row_bamboo::rm_from_retired(BBLockEntry * en, bool is_abort, txn_m
 // case 2.1: entry is RD
 // case 2.1.1: [entry] is co-head
 // case 2.1.1.1: has other co-head
-// - [R](R)W       W will not become co-head 
+// - [R](R)W       W will not become co-head
 // case 2.1.1.2: no other co-head
 // - [R]W          [acction point] W becomes cohead, decrement barrier
 // case 2.1.2: [entry] is not co-head -> there is a W as co-head
@@ -502,15 +667,15 @@ void Row_bamboo::update_entry(BBLockEntry * entry) {
         if (entry->is_cohead && (!entry->prev)) {
             entry = entry->next;
             if (entry) {
-                    if (entry->type == LOCK_SH)
-                        return; // has other RD cohead
-                    else {
+                if (entry->type == LOCK_SH)
+                    return; // has other RD cohead
+                else {
 #if PF_CS
-                        DEC_BARRIER_PF(entry);
+                    DEC_BARRIER_PF(entry);
 #else
-                        DEC_BARRIER(entry);
+                    DEC_BARRIER(entry);
 #endif
-                    }
+                }
             } else if (owners) {
 #if PF_CS
                 DEC_BARRIER_PF(owners);
@@ -543,23 +708,21 @@ void Row_bamboo::update_entry(BBLockEntry * entry) {
 #else
                 DEC_BARRIER(entry);
 #endif
-
             }
             entry = entry->next;
         }
         if (!updated && owners) {
 #if PF_CS
-                DEC_BARRIER_PF(owners);
+            DEC_BARRIER_PF(owners);
 #else
-                DEC_BARRIER(owners);
+            DEC_BARRIER(owners);
 #endif
         }
     }
 }
 
 inline
-BBLockEntry * Row_bamboo::remove_descendants(BBLockEntry * en, txn_man *
-txn) {
+BBLockEntry * Row_bamboo::remove_descendants(BBLockEntry * en, txn_man * txn) {
     // en->type must be LOCK_EX, which conflicts with everything after it.
     // including owners
     assert(en->type == LOCK_EX);
@@ -568,21 +731,45 @@ txn) {
     // abort till end, no need to update barrier as set abort anyway
     LIST_RM_SINCE(retired_head, retired_tail, en);
     while(en) {
+#if TEST_BB_ABORT
+        if (en->txn->WaitingSetContains(txn->get_txn_id()) && en->txn->status == RUNNING) {
+            // bb wound dependency, if dependency's waiting contains to_insert
+        } else{
+            // if not, not exist cycle, but wound
+            INC_STATS( txn->get_thd_id(), blind_kill_count, 1);
+        }
+#endif
+#if PF_MODEL
+        INC_STATS(txn->get_thd_id(), cascading_abort_cnt, 1);
+#endif
         en->txn->set_abort(true);
         to_return = en;
         if (retired_cnt == 0)
-          printf("error!\n");
+            printf("error!\n");
         retired_cnt--;
-#if PF_ABORT 
+#if PF_ABORT
         txn->abort_chain++;
+        txn->wound_cascad = true;
 #endif
         en = en->next;
         return_entry(to_return);
     }
     // empty owners
     if (owners) {
-#if PF_ABORT 
+#if PF_ABORT
         txn->abort_chain++;
+        txn->wound_cascad = true;
+#endif
+#if TEST_BB_ABORT
+        if (owners->txn->WaitingSetContains(txn->get_txn_id()) && owners->txn->status == RUNNING) {
+            // bb wound dependency, if dependency's waiting contains to_insert
+        } else{
+            // if not, not exist cycle, but wound
+            INC_STATS( txn->get_thd_id(), blind_kill_count, 1);
+        }
+#endif
+#if PF_MODEL
+        INC_STATS(txn->get_thd_id(), cascading_abort_cnt, 1);
 #endif
         owners->txn->set_abort();
         return_entry(owners);
@@ -597,13 +784,13 @@ txn) {
 }
 
 inline
-RC Row_bamboo::insert_read_to_retired(BBLockEntry * to_insert, ts_t ts, 
-				Access * access) {
-	RC rc = RCOK;
-	BBLockEntry * en = retired_head;
-    // TODO: handle case if en is committed. 
-	for (UInt32 i = 0; i < retired_cnt; i++) {
-		if ((en->type == LOCK_EX) && (en->txn->get_ts() > ts)) {
+RC Row_bamboo::insert_read_to_retired(BBLockEntry * to_insert, ts_t ts,
+                                      Access * access) {
+    RC rc = RCOK;
+    BBLockEntry * en = retired_head;
+    // TODO: handle case if en is committed.
+    for (UInt32 i = 0; i < retired_cnt; i++) {
+        if ((en->type == LOCK_EX) && (en->txn->get_ts() > ts)) {
             // increment barrier anyway. if is not cohead, decrement the barrier
             en->txn->increment_commit_barriers();
             // compiler barrier
@@ -615,33 +802,51 @@ RC Row_bamboo::insert_read_to_retired(BBLockEntry * to_insert, ts_t ts,
                 else
                     en->is_cohead = false;
                 assert((en->txn->commit_barriers & 3UL) != COMMITED);
-			    break;
+                break;
             }
-		}
-		en = en->next;
-	}
-	if (en) {
+        }
+        en = en->next;
+    }
+
+    if (en) {
         assert(ts != 0);
         //INSERT_TO_RETIRED(to_insert, en);
-        UPDATE_RETIRE_INFO(to_insert, en->prev); 
-        LIST_INSERT_BEFORE_CH(retired_head, en, to_insert); 
-        to_insert->status = LOCK_RETIRED; 
+        UPDATE_RETIRE_INFO(to_insert, en->prev);
+#if BB_TRACK_DEPENDENS
+        if (en->prev != nullptr && en->prev->txn != nullptr){
+            if (en->prev->type == LOCK_EX){
+                to_insert->txn->i_depend_set->insert(en->prev->txn->get_txn_id());  //to_insert->en->prev
+            }
+            en->prev->txn->dependend_on_me->insert(to_insert->txn->get_txn_id());
+        }
+#endif
+#if TEST_BB_ABORT
+        if (en->prev && en->prev->type != LOCK_SH && to_insert->txn != nullptr) {
+            en->prev->txn->PushDependency(to_insert->txn, to_insert->txn->get_txn_id(), DepType::WRITE_READ_);
+            if(en->prev->txn->status == RUNNING) {
+                to_insert->txn->UnionWaitingSet(en->prev->txn->bb_waiting);
+            }
+        }
+#endif
+        LIST_INSERT_BEFORE_CH(retired_head, en, to_insert);
+        to_insert->status = LOCK_RETIRED;
         retired_cnt++;
-		to_insert->txn->lock_ready = true;
+        to_insert->txn->lock_ready = true;
 #if PF_CS
         uint64_t startt = get_sys_clock();
-        access->data->copy(en->access->orig_data);
-        INC_STATS(to_insert->txn->get_thd_id(), time_copy, get_sys_clock() - startt);
-#else
-        access->data->copy(en->access->orig_data);
 #endif
-		rc = FINISH;
+        access->data->copy(en->access->orig_data);
+#if PF_CS
+        INC_STATS(to_insert->txn->get_thd_id(), time_copy_latch, get_sys_clock() - startt);
+#endif
+
+        rc = FINISH;
 #if DBEUG_BAMBOO
         check_correctness();
 #endif
-	} else {
-		if (owners) {
-            // insert before owners. 
+    } else {
+        if (owners) {
+            // insert before owners.
             assert(ts != 0);
             owners->txn->increment_commit_barriers();
             COMPILER_BARRIER
@@ -650,28 +855,44 @@ RC Row_bamboo::insert_read_to_retired(BBLockEntry * to_insert, ts_t ts,
                     owners->txn->decrement_commit_barriers();
                 else
                     owners->is_cohead = false;
-                UPDATE_RETIRE_INFO(to_insert, retired_tail); 
-                LIST_PUT_TAIL(retired_head, retired_tail, to_insert); 
-                to_insert->status = LOCK_RETIRED; 
-                retired_cnt++; 
+                UPDATE_RETIRE_INFO(to_insert, retired_tail);
+#if BB_TRACK_DEPENDENS
+                if (retired_tail != nullptr && retired_tail->txn != nullptr){
+                    if (retired_tail->type == LOCK_EX){
+                        to_insert->txn->i_depend_set->insert(retired_tail->txn->get_txn_id());  //to_insert->retired_tail
+                    }
+                    retired_tail->txn->dependend_on_me->insert(to_insert->txn->get_txn_id());
+                }
+#endif
+#if TEST_BB_ABORT
+                if (retired_tail && retired_tail->type != LOCK_SH && to_insert->txn != nullptr) {
+                    retired_tail->txn->PushDependency(to_insert->txn, to_insert->txn->get_txn_id(), DepType::WRITE_READ_);
+                    if(retired_tail->txn->status == RUNNING) {
+                        to_insert->txn->UnionWaitingSet(retired_tail->txn->bb_waiting);
+                    }
+                }
+#endif
+                LIST_PUT_TAIL(retired_head, retired_tail, to_insert);
+                to_insert->status = LOCK_RETIRED;
+                retired_cnt++;
 #if PF_CS
                 uint64_t startt = get_sys_clock();
+#endif
                 access->data->copy(owners->access->orig_data);
-                INC_STATS(to_insert->txn->get_thd_id(), time_copy, get_sys_clock() - startt);
-#else
-                access->data->copy(owners->access->orig_data);
+#if PF_CS
+                INC_STATS(to_insert->txn->get_thd_id(), time_copy_latch, get_sys_clock() - startt);
 #endif
                 to_insert->txn->lock_ready = true;
                 rc = FINISH;
                 assert((owners->txn->commit_barriers & 3UL) != COMMITED);
             } else {
                 // COMMITED. add RD to waiters
-		        add_to_waiters(ts, to_insert);
-				rc = WAIT;
+                add_to_waiters(ts, to_insert);
+                rc = WAIT;
             }
-		} else {
+        } else {
 #if BB_AUTO_RETIRE
-#if BB_ALWAYS_RETIRE_READ
+            #if BB_ALWAYS_RETIRE_READ
 		    if (waiters_head && a_high_than_b(waiters_head->txn->ts, ts)) {
 		        add_to_waiters(ts, to_insert);
 				rc = WAIT;
@@ -695,20 +916,38 @@ RC Row_bamboo::insert_read_to_retired(BBLockEntry * to_insert, ts_t ts,
 			}
 #endif
 #else
-            UPDATE_RETIRE_INFO(to_insert, retired_tail);
+            UPDATE_RETIRE_INFO(to_insert, retired_tail );
+#if BB_TRACK_DEPENDENS
+            if (retired_tail != nullptr && retired_tail->txn != nullptr ){
+                if (retired_tail->type == LOCK_EX){
+                    to_insert->txn->i_depend_set->insert(retired_tail->txn->get_txn_id());  //to_insert->retired_tail
+                }
+                retired_tail->txn->dependend_on_me->insert(to_insert->txn->get_txn_id());
+            }
+#endif
+#if TEST_BB_ABORT
+            if (retired_tail && retired_tail->type != LOCK_SH && to_insert->txn != nullptr) {
+                retired_tail->txn->PushDependency(to_insert->txn, to_insert->txn->get_txn_id(), DepType::WRITE_READ_);
+                if(retired_tail->txn->status == RUNNING) {
+                    to_insert->txn->UnionWaitingSet(retired_tail->txn->bb_waiting);
+                }
+            }
+#endif
             ADD_TO_RETIRED_TAIL(to_insert);
             to_insert->txn->lock_ready = true;
             rc = RCOK;
 #endif
-		}
-	}
+        }
+    }
+
+
 #if DEBUG_TMP
     printf("[txn-%lu] lock_get(%p, RD) status=%d ts=%lu\n", to_insert->txn->get_txn_id(), this, rc, ts);
 #endif
 #if DBEUG_BAMBOO
     check_correctness();
 #endif
-	return rc;
+    return rc;
 }
 
 #if DEBUG_BAMBOO
@@ -775,3 +1014,5 @@ void Row_bamboo::check_correctness() {
 	assert(cnt == waiter_cnt);
 }
 #endif
+
+//#endif

@@ -22,8 +22,11 @@ RC ycsb_wl::init() {
 	workload::init();
 	next_tid = 0;
 	string path = "./benchmarks/YCSB_schema.txt";
+
+    path="/home/zhangqian/papers/hotspot-friend/rebirth-retire/Rebirth-Retire/benchmarks/YCSB_schema.txt";
+
 	init_schema( path );
-	
+
 	init_table_parallel();
 //	init_table();
 	return RCOK;

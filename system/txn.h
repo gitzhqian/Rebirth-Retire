@@ -1,6 +1,14 @@
 #pragma once
 
 #include "global.h"
+//#include "bloom_filter.h"
+#include <unordered_map>
+#include <unordered_set>
+#include <stack>
+#include "manager.h"
+#include "row.h"
+//#include <unordered_set>
+//#include "tbb/tbb.h"
 
 class workload;
 class thread_t;
@@ -9,27 +17,38 @@ class table_t;
 class base_query;
 class INDEX;
 class txn_man;
+struct BBLockEntry;
 #if CC_ALG == WOUND_WAIT || CC_ALG == WAIT_DIE || CC_ALG == NO_WAIT || CC_ALG == DL_DETECT
 struct LockEntry;
 #elif CC_ALG == BAMBOO
-struct BBLockEntry;
+//struct BBLockEntry;
+#elif CC_ALG == REBIRTH_RETIRE
+struct Version;
+struct LockEntry;
 #endif
 
-// each thread has a txn_man. 
+// each thread has a txn_man.
 // a txn_man corresponds to a single transaction.
 
 //For VLL
 enum TxnType {VLL_Blocked, VLL_Free};
 
+
 class Access {
-  public:
-    access_t 	type;
+public:
+    access_t 	type;       // operation type
+    row_t * 	data;       // real data of this tuple version[In write operation, it records the new data]
+
     row_t * 	orig_row;
-    row_t * 	data;
     row_t * 	orig_data;
+
+#if CC_ALG == REBIRTH_RETIRE
+    Version*    tuple_version;              // points to the tuple version accessed by txn
+    Version*    old_version;
+#endif
 #if CC_ALG == BAMBOO
     BBLockEntry * lock_entry;
-#elif CC_ALG == WOUND_WAIT || CC_ALG == WAIT_DIE || CC_ALG == NO_WAIT || CC_ALG == DL_DETECT
+#elif CC_ALG == WOUND_WAIT || CC_ALG == WAIT_DIE || CC_ALG == NO_WAIT || CC_ALG == DL_DETECT || CC_ALG == REBIRTH_RETIRE
     LockEntry * lock_entry;
 #elif CC_ALG == TICTOC
     ts_t 		wts;
@@ -65,18 +84,24 @@ struct TxnEntry {
 
 class txn_man
 {
-  public:
+public:
     // **************************************
     // General Data Fields
     // **************************************
     // update per txn
 #if LATCH == LH_MCSLOCK
     mcslock::mcs_node * mcs_node;
+#elif LATCH == LH_MUTEX
+    pthread_mutex_t * latch;
+#else
 #endif
+
     thread_t *          h_thd;
     workload *          h_wl;
     txnid_t 		    txn_id;
-    uint64_t            abort_cnt;
+    uint64_t            abort_cnt;          // Actually this attribute is useless because no one accesses it.
+
+
 
     // update per request
     row_t * volatile    cur_row;
@@ -95,12 +120,16 @@ class txn_man
 
     // [DL_DETECT, NO_WAIT, WAIT_DIE, WOUND_WAIT, BAMBOO]
     bool volatile       lock_ready;
-    bool volatile       lock_abort; // forces another waiting txn to abort.
-    status_t volatile   status; // RUNNING, COMMITED, ABORTED, HOLDING
+    bool volatile       lock_abort;         // forces another waiting txn to abort.
+    status_t volatile   status;         // RUNNING, COMMITED, ABORTED, HOLDING
 #if PF_ABORT
     uint64_t            abort_chain;
-    uint8_t             padding0[64 - sizeof(bool)*2 - sizeof(status_t)-
-    sizeof(uint64_t)];
+    uint8_t             padding0[64 - sizeof(bool)*2 - sizeof(status_t)- sizeof(uint64_t)];
+    bool                wound;
+    bool                wound_cascad;
+    uint64_t            start_sys_clock ;
+    uint64_t            wait_latch_time;
+    void  insert_wound(std::string ss);
 #else
     uint8_t             padding0[64 - sizeof(bool)*2 - sizeof(status_t)];
 #endif
@@ -108,10 +137,11 @@ class txn_man
 
     // [BAMBOO]
     ts_t volatile       timestamp;
+
     uint8_t             padding1[64 - sizeof(ts_t)];
     // share its own cache line since it happens tooooo frequent.
-    // bamboo -- combine both status and barrier into one int. 
-    // low 2 bits representing status 
+    // bamboo -- combine both status and barrier into one int.
+    // low 2 bits representing status
     uint64_t volatile   commit_barriers;
     uint8_t             padding2[64 - sizeof(uint64_t)];
     //uint64_t volatile   tmp_barriers;
@@ -122,17 +152,51 @@ class txn_man
     uint64_t 		    start_ts; // bamboo: update once per txn
     // [OCC]
     uint64_t 		    end_ts;
-    int 			    row_cnt;
-    int	 		        wr_cnt;
+
+
+    int 			    row_cnt;                // the count of tuples I access
+    int	 		        wr_cnt;                 // the count of tuples I modify
+
     Access **		    accesses;
     int 			    num_accesses_alloc;
+
     // [TIMESTAMP, MVCC]
     bool volatile       ts_ready;
     // [HSTORE]
     int volatile 	    ready_part;
     // [TICTOC]
     bool                _write_copy_ptr;
-#if CC_ALG == TICTOC
+
+#if BB_TRACK_DEPENDENS
+    std::unordered_set<uint64_t> *i_depend_set;
+    tbb::concurrent_unordered_set<uint64_t> *dependend_on_me;
+#endif
+
+#if CC_ALG == REBIRTH_RETIRE
+    struct dep_element{
+        txn_man* dep_txn;
+        uint64_t dep_txn_id;             // the txn_id of retire_txn, used in writing phase to avoid wrong semaphore--
+        DepType dep_type;
+    };
+    typedef  tbb::concurrent_vector<dep_element> Dependency;
+    uint64_t               rr_serial_id;
+    uint64_t volatile      rr_semaphore;
+    bool volatile          ready_abort;
+    tbb::concurrent_unordered_multimap<txn_man*, DepType> i_dependency_on;
+    bool volatile          has_conflict;
+//    uint64_t               wound_txn_id;
+//    std::unordered_map<txn_man *, std::vector<uint64_t> *> *graph_ ;
+
+#if READ_ONLY_OPTIMIZATION_ENABLE
+    // Optimization for read_only long transaction.
+    bool                is_long;
+    bool                read_only;
+#endif
+
+    Dependency          *rr_dependency;
+    volatile bool       status_latch;
+
+#elif CC_ALG == TICTOC
     bool			    _atomic_timestamp;
     ts_t 			    _max_wts;
     ts_t 			    last_wts;
@@ -155,14 +219,14 @@ class txn_man
     uint64_t            piece_starttime;
     // [HEKATON]
 #elif CC_ALG == HEKATON
-    volatile void * volatile     history_entry;
+//    volatile void * volatile     history_entry;
+    void * volatile    history_entry;
 #endif
 
     // **************************************
     // General Main Functions
     // **************************************
-    virtual void        init(thread_t * h_thd, workload * h_wl, uint64_t
-    part_id);
+    virtual void        init(thread_t * h_thd, workload * h_wl, uint64_t  part_id);
     void                release();
     virtual RC 		    run_txn(base_query * m_query) = 0;
     RC 			        finish(RC rc);
@@ -193,9 +257,10 @@ class txn_man
     // [WW, BAMBOO]
     // if already abort, no change, return aborted
     // if already commit, no change, return committed
-    // if running, set abort, return aborted.  
-    status_t            set_abort(bool cascading=false) {
-#if CC_ALG == BAMBOO 
+    // if running, set abort, return aborted.
+    // 1:exec deadlock check abort,  2:exec deadlock check abort,  3:valid deadlock check abort, 4:valid rw abort, 5:valid cascading abort
+    status_t   set_abort(uint32_t cascading=0) {
+#if CC_ALG == BAMBOO
         uint64_t local = commit_barriers;
         uint64_t barriers = local >> 2;
         uint64_t s = local & 3UL;
@@ -207,7 +272,8 @@ class txn_man
             local = commit_barriers;
             barriers = local >> 2;
             s = local & 3UL;
-        } 
+//            assert(s == ABORTED);
+        }
         if (s == ABORTED) {
             if (!lock_abort)
                 lock_abort = true;
@@ -223,18 +289,37 @@ class txn_man
             return COMMITED;
         }
 #elif CC_ALG == WOUND_WAIT || CC_ALG == IC3
-       if (ATOM_CAS(status, RUNNING, ABORTED)) {
+        if (ATOM_CAS(status, RUNNING, ABORTED)) {
             lock_abort = true;
             return ABORTED;
        }
-       return status; // COMMITED or ABORTED
+       return status;       // COMMITED or ABORTED
+#elif CC_ALG == REBIRTH_RETIRE
+        if(status == ABORTED){
+            return ABORTED;
+        }
+        else if(status == RUNNING ){
+//            INC_STATS(this->get_thd_id(), find_circle_abort, 1);
+            ATOM_CAS(status, RUNNING, ABORTED);
+//            assert(status == ABORTED);
+            return status;
+        }else if(status == validating ) {
+            ATOM_CAS(status, validating, ABORTED);
+            return status;
+        }
+        else{           // Possible: mis-kill
+            return status;
+        }
 #else
-    return ABORTED;
+        return ABORTED;
 #endif
-    };
+    }
+
     status_t            wound_txn(txn_man * txn);
+
     void                increment_commit_barriers();
     void                decrement_commit_barriers();
+
     // dynamically set timestamp
     bool                atomic_set_ts(ts_t ts);
     ts_t			    set_next_ts(int n);
@@ -242,6 +327,7 @@ class txn_man
     ts_t                get_exec_time() {return get_sys_clock() - start_ts;};
 #if CC_ALG == BAMBOO
     RC                  retire_row(int access_cnt);
+
 #endif
     // [VLL]
     row_t * 		    get_row(row_t * row, access_t type);
@@ -253,6 +339,7 @@ class txn_man
     RC                  end_piece(int piece_id);
     void                abort_ic3();
     int                 get_txn_pieces(int tpe);
+
 #if CC_ALG == IC3
     RC                  validate_ic3();
     // [TICTOC]
@@ -261,19 +348,52 @@ class txn_man
     ts_t 			    get_max_wts() 	{ return _max_wts; }
     void 			    update_max_wts(ts_t max_wts);
     // [Hekaton]
-#elif CC_ALG == Hekaton
+#elif CC_ALG == HEKATON
     RC 				    validate_hekaton(RC rc);
     // [SILO]
 #elif CC_ALG == SILO
     RC				    validate_silo();
+#elif CC_ALG == REBIRTH_RETIRE
+    RC                  validate_rr(RC rc);
+    void                abort_process(txn_man * txn );
+
+//    inline uint64_t 	get_hotspot_friendly_txn_id(){return this->rr_txn_id;}
+
+    void PushDependency(txn_man *dep_txn, uint64_t dep_txn_id,DepType depType) {
+        dep_element temp_element = {dep_txn,dep_txn_id,depType};
+        rr_dependency->push_back(temp_element);
+    }
+
+    void insert_i_dependency_on(txn_man *dep_txn, DepType depType){
+        i_dependency_on.insert(std::make_pair(dep_txn, depType));
+    }
+
+    void SemaphoreAddOne() {
+        ATOM_ADD(rr_semaphore,1);
+    }
+
+    void SemaphoreSubOne() {
+        if(rr_semaphore == 0) {
+            // This is an aggressive subtraction, this txn_man has already started a new transaction, so semaphore shouldn't be subtracted.
+        }
+        else {
+            auto new_val = ATOM_SUB_FETCH(rr_semaphore,1);
+            if(new_val == UINT64_MAX) {
+                rr_semaphore = 0;
+            }
+        }
+    }
+
 #endif
 
-  protected:
+//    bool insert_hotspot(uint64_t hots) ;
+
+protected:
     void 			    insert_row(row_t * row, table_t * table);
     void                index_insert(row_t * row, INDEX * index, idx_key_t key);
 
-  private:
-#if CC_ALG == BAMBOO || CC_ALG == WOUND_WAIT || CC_ALG == WAIT_DIE || CC_ALG == NO_WAIT || CC_ALG == DL_DETECT
+private:
+#if CC_ALG == BAMBOO || CC_ALG == WOUND_WAIT || CC_ALG == WAIT_DIE || CC_ALG == NO_WAIT || CC_ALG == DL_DETECT ||  CC_ALG == REBIRTH_RETIRE
     void                assign_lock_entry(Access * access);
 #endif
 
@@ -282,8 +402,16 @@ class txn_man
 
 inline status_t txn_man::wound_txn(txn_man * txn)
 {
-#if CC_ALG == BAMBOO || CC_ALG == WOUND_WAIT
-    return txn->set_abort();
+#if CC_ALG == BAMBOO || CC_ALG == WOUND_WAIT || CC_ALG == HOTSPOT_FRIENDLY
+#if PF_CS
+    uint64_t time_wound = get_sys_clock();
+#endif
+    auto ret = txn->set_abort();
+#if PF_CS
+    INC_STATS(txn->get_thd_id(), time_wound, get_sys_clock() - time_wound);
+#endif
+
+    return ret;
 #else
     return ABORTED;
 #endif
