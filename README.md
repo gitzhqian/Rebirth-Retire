@@ -1,15 +1,20 @@
 DBx1000 Rebirth-Retire
 ==============
 The repository is built on DBx1000: 
-     https://github.com/yxymit/DBx1000 
-     https://github.com/ScarletGuo/Bamboo-Public
-    
-    Staring into the Abyss: An Evaluation of Concurrency Control with One Thousand Cores
-    Xiangyao Yu, George Bezerra, Andrew Pavlo, Srinivas Devadas, Michael Stonebraker
-    http://www.vldb.org/pvldb/vol8/p209-yu.pdf
+
+https://github.com/yxymit/DBx1000 
+```
+     Staring into the Abyss: An Evaluation of Concurrency Control with One Thousand Cores
+     Xiangyao Yu, George Bezerra, Andrew Pavlo, Srinivas Devadas, Michael Stonebraker
+     http://www.vldb.org/pvldb/vol8/p209-yu.pdf
+```
+
+https://github.com/ScarletGuo/Bamboo-Public
+```
     Releasing Locks As Early As You Can: Reducing Contention of Hotspots by Violating Two-Phase Locking
     Zhihan Guo, Kan Wu, Cong Yan, Xiangyao Yu
- 
+```
+
 The major changes made in this repository:
 - added support for Rebirth-Retire and its optimizations. Rebirth-Retire is a concurrency control protocol proposed in:
 ```
