@@ -47,15 +47,7 @@ RC txn_man::validate_rr(RC rc) {
 
     std::unordered_map<uint64_t, DepType> i_depents;
     auto direct_depents = this->rr_dependency;
-#if KEY_ORDER == false
-    for (auto &dep_pair: *direct_depents) {
-        auto dep_txn = dep_pair.dep_txn;
-        if (dep_txn != nullptr && dep_txn->status != ABORTED ) {
-            i_depents.insert(std::make_pair(dep_txn->get_txn_id(), dep_pair.dep_type));
-        }
-    }
-#endif
-
+ 
     uint64_t i_dependency_on_size = i_dependency_on.size();
     assert(this->rr_semaphore == i_dependency_on_size);
 
@@ -99,13 +91,6 @@ RC txn_man::validate_rr(RC rc) {
                             this->rr_semaphore -- ;
                         }
                     } else{
-#if KEY_ORDER
-                        this->set_ts(depend_txn_ts+1);
-                        this->hotspot_friendly_serial_id = depend_txn_ts+1;
-                        if (this->hotspot_friendly_semaphore > 0){
-                            this->hotspot_friendly_semaphore -- ;
-                        }
-#else
                         auto itr = i_depents.find(depend_txn->get_txn_id());
                         if ( itr != i_depents.end()){
 
@@ -118,7 +103,6 @@ RC txn_man::validate_rr(RC rc) {
                                 this->rr_semaphore -- ;
                             }
                         }
-#endif
                     }
                 }
             }
@@ -474,9 +458,7 @@ void txn_man::abort_process(txn_man * txn ){
             if (dep_pair.dep_txn != nullptr){
                 if (dep_pair.dep_txn->status == RUNNING  || dep_pair.dep_txn->status == validating) {
                     dep_pair.dep_txn->set_abort(5);
-//#if PF_ABORT
-//                    dep_pair.dep_txn->wound_cascad = true;
-//#endif
+ 
 #if PF_CS
                     INC_STATS(this->get_thd_id(), cascading_abort_cnt, 1);
 #endif
