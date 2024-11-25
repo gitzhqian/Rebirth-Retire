@@ -21,8 +21,6 @@ The major changes made in this repository:
 - modified test scripts to facilitate easier evaluation and assessment
 
 
-
-
 Build & Test
 ------------
 
@@ -30,6 +28,8 @@ To test the database
 
     bash ycsb-test.sh
 
+ycsb test result, like: 
+![image](https://github.com/user-attachments/assets/5ea6d5f3-f692-4004-9c11-d5bd4002079e)
     
 Configure & Run
 ---------------
