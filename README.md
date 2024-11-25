@@ -26,7 +26,7 @@ The major changes made in this repository:
 - modified test scripts to facilitate easier evaluation and assessment
 
 
-Build & Test
+Build & Test & Results
 ------------
 
 To evaluate the database, the following script can be executed, 
