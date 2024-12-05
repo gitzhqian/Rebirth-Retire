@@ -166,7 +166,7 @@ string test_index = "4";
 string test_index = "5";
 #endif
 
-//string temp ="/home/zhangqian/Hotspot-Friendly/test-paper/"+ cc_name + "/" + target + ".txt";
+//string temp ="/home/zhangqian/test-paper/"+ cc_name + "/" + target + ".txt";
 //string temp_path= temp.c_str();
 //char * output_file = const_cast<char *>(temp.c_str());
 
@@ -182,11 +182,6 @@ UInt32 g_max_items = 100000;
 UInt32 g_cust_per_dist = 3000;
 #endif
 uint64_t g_max_orderline = uint64_t(1) << 32;
-
-//for test
-//tbb::concurrent_vector<std::pair<string, std::pair<string,std::pair<string, std::pair<string, string>>>>> wound_retired_wr_list ;
-//tbb::concurrent_vector<std::pair<string, std::pair<string,string>>> wound_retired_rd_list ;
-//tbb::concurrent_vector<std::pair<string,  string>> wound_owners_list ;
 
 std::atomic<uint64_t> wound_retire_count;
 std::atomic<uint64_t> wound_owner_count;

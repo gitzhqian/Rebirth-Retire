@@ -221,32 +221,6 @@ void Stats::print() {
         std::cout << "dl_detect_time=" << dl_detect_time / BILLION << ", ";
         std::cout << "dl_wait_time=" << dl_wait_time / BILLION << "\n";
 
-
-//        std::cout << "one_hot_txn_count :" <<  one_hot_txn_count   << "\n";
-#if TEST_BAMBOO
-        string path = "/home/zhangqian/Hotspot-Friendly/wound_wr.txt";
-        char * output_wound_retired_wr = const_cast<char *>(path.c_str());
-        ofstream outf1(output_wound_retired_wr,ios::app);
-        outf1.clear();
-        if (outf1.is_open()) {
-            for (auto itr = wound_retired_wr_list.cbegin(); itr != wound_retired_wr_list.cend(); ++itr) {
-                outf1 << "LOCK_EX wound_retired_wr_list, wound txn :" <<  itr->first << ", entry kill list:" << itr->second.first << "; " << ", entry owner list:" << itr->second.second.first << ", entry retire list:" << itr->second.second.second.first << ", entry wait list:" << itr->second.second.second.second << "\n";
-            }
-
-            for (auto itr = wound_owners_list.cbegin(); itr != wound_owners_list.cend(); ++itr) {
-                outf1 << "LOCK_EX wound_owners_list, wound txn :" <<  itr->first << ", kill txn: " << itr->second << "; " << "\n";
-            }
-
-            outf1.close();
-        }
-
-
-        for (auto itr = wound_retired_rd_list.cbegin(); itr != wound_retired_rd_list.cend(); ++itr) {
-            std::cout << "LOCK_SH wound_retired_rd_list, wound txn :" <<  itr->first << ", entry retire list:" << itr->second.first << "; " << ", entry kill list:" << itr->second.second << "\n";
-        }
-#endif
-
-//        hotspot_friendly_dependency
     }
     if (g_prt_lat_distr)      // g_prt_lat_distr == false
         print_lat_distr();
