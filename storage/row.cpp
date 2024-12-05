@@ -237,7 +237,11 @@ RC row_t::retire_row(BBLockEntry * lock_entry) {
     return this->manager->lock_retire(lock_entry);
 }
 #endif
-
+#if CC_ALG == REBIRTH_RETIRE
+RC row_t::retire_row(LockEntry * lock_entry) {
+    return this->manager->active_retire(lock_entry);
+}
+#endif
 /**
  * Actually access current row(me).
  * Call getLock() / access() according to the CC.
@@ -253,7 +257,7 @@ RC row_t:: get_row(access_t type, txn_man * txn, row_t *& row, Access * access) 
 #if CC_ALG == IC3
     this->manager->access(access->data, access);
     return rc;
-#elif CC_ALG == WAIT_DIE || CC_ALG == NO_WAIT || CC_ALG == DL_DETECT || CC_ALG == WOUND_WAIT || CC_ALG == BAMBOO
+#elif CC_ALG == WAIT_DIE || CC_ALG == NO_WAIT || CC_ALG == DL_DETECT || CC_ALG == WOUND_WAIT || CC_ALG == BAMBOO || CC_ALG == REBIRTH_RETIRE
     uint64_t thd_id = txn->get_thd_id();
       lock_t lt = (type == RD || type == SCAN)? LOCK_SH : LOCK_EX;
       #if CC_ALG == DL_DETECT
@@ -262,13 +266,15 @@ RC row_t:: get_row(access_t type, txn_man * txn, row_t *& row, Access * access) 
 
       // 2-17 [BUG in BAMBOO] : DL_DETECT should provide 5 inputs, or there will be compiling error.
        rc = this->manager->lock_get(lt, txn, txnids, txncnt,access);
-
       #elif CC_ALG == BAMBOO || CC_ALG == WOUND_WAIT
       if (txn->lock_abort) {
         row = NULL;
         return Abort;
       }
       rc = this->manager->lock_get(lt, txn, access);
+      #elif CC_ALG == REBIRTH_RETIRE
+      TsType ts_type = (type == RD)? R_REQ : P_REQ;
+      rc = this->manager->access(txn, ts_type, access);
       #else
       #if CC_ALG != NO_WAIT
       assert(txn->get_ts() != 0);
@@ -281,22 +287,22 @@ RC row_t:: get_row(access_t type, txn_man * txn, row_t *& row, Access * access) 
         row = NULL;
         return rc;
       } else if (rc == WAIT) {
-        ASSERT(CC_ALG == WAIT_DIE || CC_ALG == DL_DETECT || CC_ALG == WOUND_WAIT || CC_ALG == BAMBOO);
+        ASSERT(CC_ALG == WAIT_DIE || CC_ALG == DL_DETECT || CC_ALG == WOUND_WAIT || CC_ALG == BAMBOO || CC_ALG == REBIRTH_RETIRE);
         uint64_t starttime = get_sys_clock();
         #if CC_ALG == DL_DETECT
         bool dep_added = false;
         #endif
         uint64_t endtime;
-        #if (CC_ALG != WOUND_WAIT) && (CC_ALG != BAMBOO)
-        txn->lock_abort = false;
+        #if (CC_ALG != WOUND_WAIT) && (CC_ALG != BAMBOO) && (CC_ALG != REBIRTH_RETIRE)
+            txn->lock_abort = false;
         #endif
         INC_STATS(txn->get_thd_id(), wait_cnt, 1);
         while (!txn->lock_ready && !txn->lock_abort)
         {
-        #if CC_ALG == WAIT_DIE || (CC_ALG == WOUND_WAIT) || (CC_ALG == BAMBOO)
-          continue;
+        #if CC_ALG == WAIT_DIE || (CC_ALG == WOUND_WAIT) || (CC_ALG == BAMBOO) || (CC_ALG == REBIRTH_RETIRE)
+            continue;
         #elif CC_ALG == DL_DETECT
-          uint64_t last_detect = starttime;
+            uint64_t last_detect = starttime;
           uint64_t last_try = starttime;
           uint64_t now = get_sys_clock();
           if (now - starttime > g_timeout ) {
@@ -336,7 +342,6 @@ RC row_t:: get_row(access_t type, txn_man * txn, row_t *& row, Access * access) 
           // only possible for wound-wait based algs.
           // check if txn is aborted, if aborted due to conflicts on this or other
           // try to release lock
-
           endtime = get_sys_clock();
           uint64_t timespan = endtime - starttime;
           INC_TMP_STATS(thd_id, time_wait, timespan);
@@ -344,9 +349,8 @@ RC row_t:: get_row(access_t type, txn_man * txn, row_t *& row, Access * access) 
 //          txn->wait_latch_time = txn->wait_latch_time + timespan;
 
 #if (CC_ALG == WOUND_WAIT) || (CC_ALG == BAMBOO)
-            return_row(access->lock_entry, Abort);
+          return_row(access->lock_entry, Abort);
 #endif
-
           return Abort;
         }
 
@@ -406,27 +410,6 @@ RC row_t:: get_row(access_t type, txn_man * txn, row_t *& row, Access * access) 
 #elif CC_ALG == HSTORE || CC_ALG == VLL
     row = this;
         return rc;
-#elif CC_ALG == REBIRTH_RETIRE
-    TsType ts_type = (type == RD)? R_REQ : P_REQ;
-    rc = this->manager->access(txn, ts_type, access);
-
-//        if (rc == WAIT) {
-//            uint64_t starttime = get_sys_clock();
-//
-//            while(rc == WAIT){
-//                uint64_t span = get_sys_clock() - starttime;
-//                if(span > 1000000){
-//                    printf("WAIT txn_id:%lu,time: %lu\n",txn->hotspot_friendly_txn_id,span);
-////                    return Abort;
-//                }
-//
-//                rc = this->manager->access(txn, ts_type, access);
-//
-//                PAUSE
-//            }
-//        }
-
-    return rc;
 #else
     assert(false);
         return rc;

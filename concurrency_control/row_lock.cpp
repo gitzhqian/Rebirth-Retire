@@ -81,20 +81,10 @@ RC Row_lock::lock_get(lock_t type, txn_man * txn, uint64_t* &txnids,
     COMPILER_BARRIER
 #if PF_CS
     uint64_t endtime = get_sys_clock();
-  INC_STATS(txn->get_thd_id(), time_get_latch, endtime - starttime);
-  starttime = endtime;
+    INC_STATS(txn->get_thd_id(), time_get_latch, endtime - starttime);
+    starttime = endtime;
 #endif
     assert(owner_cnt <= g_thread_cnt);
-//  if (waiter_cnt < g_thread_cnt){
-//      rc = Abort;
-//      COMPILER_BARRIER
-//      unlock(entry->txn);
-//#if PF_CS
-//      INC_STATS(txn->get_thd_id(), time_get_cs, get_sys_clock() - starttime);
-//#endif
-//
-//      return rc;
-//  }
     assert(waiter_cnt < g_thread_cnt);
 #if DEBUG_ASSERT
     if (owners != NULL)

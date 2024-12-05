@@ -29,11 +29,10 @@ RC ycsb_txn_man::run_txn(base_query * query) {
     ycsb_wl * wl = (ycsb_wl *) h_wl;
     itemid_t * m_item = NULL;
 
-#if CC_ALG == BAMBOO && (THREAD_CNT != 1)
     int access_id;
-    retire_threshold = (uint32_t) floor(m_query->request_cnt * (1 - g_last_retire));
-#elif CC_ALG != REBIRTH_RETIRE
     row_cnt = 0;
+#if CC_ALG == BAMBOO
+    retire_threshold = (uint32_t) floor(m_query->request_cnt * (1 - g_last_retire));
 #endif
 
     // 2-27 Optimization for read_only long transaction.
@@ -44,7 +43,6 @@ RC ycsb_txn_man::run_txn(base_query * query) {
     }
 #endif
 
-
     // if long txn and not rerun aborted txn, generate queries
     if (unlikely(m_query->is_long && !(m_query->rerun))) {
         uint64_t starttime = get_sys_clock();
@@ -52,13 +50,10 @@ RC ycsb_txn_man::run_txn(base_query * query) {
         DEC_STATS(h_thd->get_thd_id(), run_time, get_sys_clock() - starttime);
     }
 
-
     for (uint32_t rid = 0; rid < m_query->request_cnt; rid ++) {
 #if CC_ALG == REBIRTH_RETIRE
         // REBIRTH_RETIRE: Abort txn actively(before executing next operation)
         if(this->status == ABORTED ){
-//            printf("ycsb executing rc: %d. \n",rc);
-//            INC_STATS(this->get_thd_id(), find_circle_abort, 1);
             rc = Abort;
             goto final;
         }
@@ -96,7 +91,7 @@ RC ycsb_txn_man::run_txn(base_query * query) {
                 rc = Abort;
                 goto final;
             }
-#if CC_ALG == BAMBOO && (THREAD_CNT != 1)
+#if CC_ALG == BAMBOO || CC_ALG == REBIRTH_RETIRE
             access_id = row_cnt - 1;
 #endif
 
@@ -144,7 +139,13 @@ RC ycsb_txn_man::run_txn(base_query * query) {
             iteration ++;
             if (req->rtype == RD || req->rtype == WR || iteration == req->scan_len)
                 finish_req = true;
-
+#if (CC_ALG == REBIRTH_RETIRE) && !PASSIVE_RETIRE
+            if (finish_req && (req->rtype == WR)) {
+                if (retire_row(access_id) == Abort) {
+                    return finish(Abort);
+                }
+            }
+#endif
 #if (CC_ALG == BAMBOO) && (THREAD_CNT != 1)
             // retire write txn
             if (finish_req && (req->rtype == WR) && (rid <= retire_threshold)) {
@@ -162,13 +163,10 @@ RC ycsb_txn_man::run_txn(base_query * query) {
 #if CC_ALG == REBIRTH_RETIRE
     if (rc == RCOK){
 //        printf("ycsb final rc: %d. \n",rc);
-        auto ret = ATOM_CAS(status, RUNNING, validating);
-//        assert(ret);
+       ATOM_CAS(status, RUNNING, validating);
     }
     if (rc == Abort) {
-        auto ret = ATOM_CAS(status, RUNNING, ABORTED);
-//        assert(ret);
-
+       ATOM_CAS(status, RUNNING, ABORTED);
     }
 #endif
 

@@ -44,9 +44,9 @@ public:
 #if CC_ALG == REBIRTH_RETIRE
     Version *reserve_version(){
         Version * new_version = nullptr;
-        auto reser_index = curr_index % total_sz;
-        new_version = free_list->at(reser_index);
-        curr_index ++;
+//        auto reser_index = curr_index % total_sz;
+//        new_version = free_list->at(reser_index);
+//        curr_index ++;
         return new_version;
     }
 

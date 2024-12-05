@@ -5,6 +5,7 @@ struct LockEntry {
     txn_man * txn;
     Access * access;
     lock_t type;
+    bool has_write;
     lock_status status;
     LockEntry * next;
     LockEntry * prev;

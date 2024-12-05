@@ -88,8 +88,7 @@ void Query_thd::init(workload * h_wl, int thread_id) {
     // XXX(zhihan): create a pre-allocated space for long txn
     if (g_long_txn_ratio > 0) {
         long_txn = (ycsb_request *)
-                mem_allocator.alloc(sizeof(ycsb_request) * MAX_ROW_PER_TXN,
-                                    thread_id);
+                mem_allocator.alloc(sizeof(ycsb_request) * MAX_ROW_PER_TXN, thread_id);
         long_txn_part = (uint64_t *)
                 mem_allocator.alloc(sizeof(uint64_t) * g_part_per_txn, thread_id);
     }

@@ -24,18 +24,6 @@ class txn_man;
 
 #define INF UINT64_MAX
 
-
-/**
- * Version Format in REBIRTH_RETIRE
- */
-
-#ifdef ABORT_OPTIMIZATION
-// 24 bit chain_number + 40 bit deep_length
-#define CHAIN_NUMBER (((1ULL << 24)-1) << 40)
-#define DEEP_LENGTH ((1ULL << 40)-1)
-#define CHAIN_NUMBER_ADD_ONE (1ULL << 40)
-#endif
-
 struct Version;
 struct HReader {
     txn_man* cur_reader;
@@ -48,16 +36,12 @@ struct Version {
     ts_t begin_ts;
     ts_t end_ts;
     access_t type;
-    volatile ts_t *dynamic_txn_ts;  //pointing to the created transaction's ts
+//    volatile ts_t *dynamic_txn_ts;  //pointing to the created transaction's ts
     HReader *read_queue;
     Version* prev;
     Version* next;
     txn_man* retire;      // the txn_man of the uncommitted txn which updates the tuple version
     row_t* data;
-
-#if ABORT_OPTIMIZATION
-    uint64_t version_number;
-#endif
 
     Version(txn_man * txn):  begin_ts(INF), end_ts(INF),retire(txn),read_queue(nullptr),type(WR) {};
 
@@ -67,9 +51,8 @@ struct Version {
         this->read_queue = nullptr;
         this->retire = nullptr;
         this->type = XP;
-        this->dynamic_txn_ts = new ts_t(0);
+//        this->dynamic_txn_ts = new ts_t(0);
         this->prev = nullptr;
-        this->version_number = 0;
     }
 };
 
@@ -77,10 +60,9 @@ struct Version {
 class Row_rr {
 public:
     void init(row_t *row);
-
     RC access(txn_man *txn, TsType type, Access *access);
-
-    Version *get_version_header() { return this->version_header; }
+    RC active_retire(LockEntry * entry);
+    bool bring_next(txn_man * txn);
 
     volatile bool blatch;
     Version *version_header;              // version header of a row's version chain (N2O)
@@ -93,135 +75,44 @@ public:
     UInt32 retired_cnt;
 
     inline LockEntry *  get_entry(Access * access) {
-      LockEntry * entry = access->lock_entry;
-      entry->next = NULL;
-      entry->prev = NULL;
-      entry->status = LOCK_DROPPED;
-      return entry;
+        LockEntry * entry = access->lock_entry;
+        entry->next = NULL;
+        entry->prev = NULL;
+        entry->status = LOCK_DROPPED;
+        entry->has_write = false;
+        return entry;
     }
 
     inline bool bring_out_waiter(LockEntry * entry, txn_man * txn) {
-        LIST_RMB(waiters_head, waiters_tail, entry);
-        entry->txn->lock_ready = true;
+//        printf("before waiter_cnt:%u, \n", waiter_cnt);
+        LIST_RM(waiters_head, waiters_tail, entry, waiter_cnt);
+        if (entry->txn != nullptr){
+            entry->txn->lock_ready = true;
+        }
+//        printf("after waiter_cnt:%u, \n", waiter_cnt);
+
         if (txn == entry->txn) {
             return true;
         }
         return false;
     };
 
-    // pop txn entry from waiter list, if current owner has many parents, not pop
-//    void bring_next() {
-//        LockEntry * entry = waiters_head;
-//        LockEntry * next = NULL;
-//        UInt32 traverse_sz = 0;
-//
-//        // If any waiter can join the owners, just do it!
-//        while (entry) {
-//            if (traverse_sz > waiter_cnt){
-//                break;
-//            }
-//
-//            if (entry->txn == nullptr || entry->txn->status == ABORTED || entry->txn->lock_ready) {
-//                traverse_sz++;
-//                LIST_RMB(waiters_head, waiters_tail, entry);
-//                if (waiter_cnt > 0){
-//                    waiter_cnt --;
-//                }
-//                entry = entry->next;
-//                continue;
-//            }
-//
-//
-//            owner = entry->txn;
-//            LIST_RMB(waiters_head, waiters_tail, entry);
-//            if (waiter_cnt > 0){
-//                waiter_cnt --;
-//            }
-//
-//            break;
-//        }
-//    }
-    void bring_next() {
-        LockEntry *entry = waiters_head;
-        LockEntry *next = NULL;
-        UInt32 traverse_sz = 0;
-        if (owner != nullptr) {
-            if (owner->status != LOCK_OWNER) {
-                owner = nullptr;
-            }
-        }
-        // If any waiter can join the owners, just do it!
-        while (entry) {
-            if (traverse_sz > waiter_cnt) {
-                break;
-            }
-
-            if (entry->txn == nullptr || entry->txn->status == ABORTED || entry->txn->lock_ready) {
-                traverse_sz++;
-                LIST_RMB(waiters_head, waiters_tail, entry);
-                if (waiter_cnt > 0) {
-                    waiter_cnt--;
-                }
-                entry = entry->next;
-                continue;
-            }
-
-            if (entry->type == LOCK_EX) {
-                // todo: still waitting
-//                if (entry->txn->i_dependency_on.size() > 1/g_thread_cnt){
-//
-//                }
-                if (owner == nullptr) {
-                    entry->status = LOCK_OWNER;
-                    entry->txn->lock_ready = true;
-                    owner = entry;
-
-                    LIST_RMB(waiters_head, waiters_tail, entry);
-                    if (waiter_cnt > 0) {
-                        waiter_cnt--;
-                    }
-                } else {
-                    if (owner->status == LOCK_RETIRED || owner->status == LOCK_DROPPED) {
-                        entry->status = LOCK_OWNER;
-                        entry->txn->lock_ready = true;
-                        owner = entry;
-
-                        LIST_RMB(waiters_head, waiters_tail, entry);
-                        if (waiter_cnt > 0) {
-                            waiter_cnt--;
-                        }
-                    }
-                }
-            } else {
-                entry->status = LOCK_RETIRED;
-                entry->txn->lock_ready = true;
-
-                LIST_RMB(waiters_head, waiters_tail, entry);
-                if (waiter_cnt > 0) {
-                    waiter_cnt--;
-                }
-            }
-
-            break;
-        }
-    }
 
     // push txn entry into waiter list, ordered by timestamps, ascending
     inline void add_to_waiters(ts_t ts, LockEntry * to_insert) {
         LockEntry * en = waiters_head;
-        UInt32 traverse_sz = 0;
+        uint32_t traverse_sz = 0;
         bool find = false;
         while (en != NULL) {
-            if (traverse_sz > waiter_cnt){
+            if (traverse_sz > waiter_cnt) {
                 break;
             }
             if (ts < en->txn->get_ts()){
                 find = true;
                 break;
             }
-
-            en = en->next;
             traverse_sz++;
+            en = en->next;
         }
         if (find) {
             LIST_INSERT_BEFORE(en, to_insert);
@@ -238,23 +129,26 @@ public:
         assert(ts != 0);
     };
 
+    inline LockEntry * find_write_in_waiter(ts_t ts) {
+        LockEntry * read = nullptr;
+        LockEntry * en = waiters_head;
+        for (UInt32 i = 0; i < retired_cnt; i++) {
+            if ((en->type == LOCK_EX) && (en->txn != nullptr) && (en->txn->get_ts() < ts)) {
+                if (en->txn->status != ABORTED ) {
+                    read = en;
+                    break;
+                }
+            }
+            en = en->next;
+        }
+
+        return read;
+    }
+
 #if LATCH == LH_SPINLOCK
     pthread_spinlock_t * spinlock_row;
 #else
     mcslock * latch_row;
-#endif
-
-#if VERSION_CHAIN_CONTROL
-    // Restrict the length of version chain.
-    uint64_t threshold;
-
-    void IncreaseThreshold(){
-        ATOM_ADD(threshold,1);
-    }
-
-    void DecreaseThreshold(){
-        ATOM_SUB(threshold,1);
-    }
 #endif
 
     void  lock_row(txn_man * txn) const {
@@ -277,14 +171,14 @@ public:
         }
     };
 
-    // check priorities
+    // check priorities, timestamps
     inline static bool a_higher_than_b(ts_t a, ts_t b) {
         return a < b;
     };
 
     inline static int assign_ts(ts_t ts, txn_man *txn) {
         if (ts == 0) {
-            ts = txn->set_next_ts(1);
+            ts = txn->set_next_ts();
             // if fail to assign, reload
             if (ts == 0) {
                 ts = txn->get_ts();
@@ -293,257 +187,142 @@ public:
         return ts;
     };
 
-    // 递归函数来添加依赖关系
-    void addDependencies(std::unordered_map<uint64_t, std::vector<txn_man*>*> *adjacencyList,
-                         txn_man *txn) {
-        auto direct_depents = txn->rr_dependency;
-        auto *curr_depts = new std::vector<txn_man *>();
-        adjacencyList->insert(std::make_pair(txn->get_thd_id(), curr_depts));
-
-        std::stack<txn_man *> dep_stack;
-        for (auto &dep_pair: *direct_depents) {
-            auto dep_txn = dep_pair.dep_txn;
-            if (dep_txn != nullptr && dep_txn->status == RUNNING ) {
-                dep_stack.push(dep_txn);
-                adjacencyList->at(txn->get_thd_id())->push_back(dep_txn); // to <- from
-            }
+    inline static int reassign_ts(txn_man *txn) {
+        ts_t ts = 0;
+        ts = txn->set_next_ts();
+        // if fail to assign, reload
+        if (ts == 0) {
+            ts = txn->get_ts();
         }
 
-        while (true){
-            std::vector<txn_man *> dep_list;
-            while (!dep_stack.empty()){
-                txn_man *txn_ = dep_stack.top();
-                if (txn_ != nullptr && txn_->status == RUNNING){
-                    dep_list.push_back(txn_);
-                }
-                dep_stack.pop();
-            }
+        return ts;
+    };
 
-            for (auto &dep_pair: dep_list) {
-                auto dep_txn_ = dep_pair;
-                if (dep_txn_ != nullptr && dep_txn_->status == RUNNING) {
-                    if (adjacencyList->find(dep_txn_->get_thd_id()) != adjacencyList->end()) continue;
-
-                    auto *curr_depts = new std::vector<txn_man *>();
-                    adjacencyList->insert(std::make_pair(dep_txn_->get_thd_id(), curr_depts));
-
-                    auto dep_txn_deps = dep_txn_->rr_dependency;
-                    if (!dep_txn_deps->empty()){
-                        for (auto &dep_: *dep_txn_deps) {
-                            if (dep_.dep_txn != nullptr && dep_.dep_txn->status == RUNNING){
-                                dep_stack.push(dep_.dep_txn);
-                                adjacencyList->at(dep_txn_->get_thd_id())->push_back(dep_.dep_txn);
-                            }
-                        }
-                    }
-                }
-            }
-
-            if (dep_stack.empty()){
+    // GC
+    inline void remove_tombstones() {
+        if (owner != nullptr && (owner->access->tuple_version->type == AT || (owner->txn != nullptr && owner->txn->status == ABORTED))){
+            owner = nullptr;
+        }
+        while (version_header) {
+            if (version_header->type == XP || (version_header->type == WR && version_header->retire->status != ABORTED)){
                 break;
             }
-        }
-    }
-
-    bool buildGraph(std::unordered_map<uint64_t, std::vector<txn_man*> *> *adjacencyList,
-                    txn_man *txn) {
-        if (txn == nullptr || txn->status == ABORTED) return false;
-        // 开始递归构建依赖图
-        addDependencies(adjacencyList, txn);
-        if (adjacencyList->empty()) return false;
-
-        return true;
-    }
-
-    bool topologicalSort(std::unordered_map<uint64_t, std::vector<txn_man*> *> *adjacencyList,
-                         std::vector<uint64_t> *sortedOrder) {
-        std::unordered_map<uint64_t, int> inDegree;
-
-        // 计算每个节点的入度
-        for (const auto& pair : *adjacencyList) {
-            uint64_t thd_id = pair.first;
-            inDegree[thd_id] = 0; // 初始化入度
-
-            for (const auto& dep_txn : *(pair.second)) {
-                if (dep_txn != nullptr && dep_txn->status == RUNNING) {
-                    inDegree[dep_txn->get_thd_id()]++; // dep_txn 依赖于 thd_id
+            if (version_header->type == AT || (version_header->retire != nullptr && version_header->retire->status == ABORTED)) {
+                if (owner == nullptr){
+                    version_header = version_header->next;
+                    version_header->prev = nullptr;
+                }else{
+                    owner->access->tuple_version->next = version_header->next;
+                    version_header = version_header->next;
+                    version_header->prev = nullptr;
                 }
             }
         }
-
-        // 初始化队列，将入度为0的节点加入
-        std::queue<uint64_t> zeroInDegreeQueue;
-        for (const auto& pair : inDegree) {
-            if (pair.second == 0) {
-                zeroInDegreeQueue.push(pair.first);
-            }
-        }
-
-        // Kahn's 算法进行拓扑排序
-        while (!zeroInDegreeQueue.empty()) {
-            uint64_t thd_id = zeroInDegreeQueue.front();
-            zeroInDegreeQueue.pop();
-
-#if !KEY_ORDER
-            auto itr = std::find(sortedOrder->begin(), sortedOrder->end(), thd_id);
-            if (itr == sortedOrder->end()){
-                sortedOrder->push_back(thd_id);
-            }
-#endif
-
-            // 遍历该节点的邻居，减少入度
-            auto it = adjacencyList->find(thd_id);
-            if (it != adjacencyList->end()) {
-#if KEY_ORDER
-                if (sortedOrder->find(thd_id) == sortedOrder->end()){
-                    sortedOrder->insert(thd_id);
-                }
-#endif
-                for (const auto& dep_txn : *(it->second)) {
-                    uint64_t dep_id = dep_txn->get_thd_id(); // 依赖于 thd_id 的事务
-
-                    // 减少入度
-                    if (inDegree[dep_id] > 0) {
-                        inDegree[dep_id]--;
-
-                        // 如果入度减为0，加入队列
-                        if (inDegree[dep_id] == 0) {
-                            zeroInDegreeQueue.push(dep_id);
-                        }
-                    }
-                }
-            }
-        }
-
-        // 检查是否有环
-        if (sortedOrder->size() != adjacencyList->size()) {
-            return true;
-        }
-
-        return false; // 无环
     }
 
-    bool wound_rebirth(ts_t ts, txn_man *curr_txn, TsType type){
+    bool wound_rebirth(ts_t ts, txn_man *curr_txn, TsType type) {
         //1. check the conflicts
         // find txns whose timestamp priority lower than me
-        auto lower_than_me = std::vector<txn_man *>();
+        auto lower_than_me = std::vector<Version *>();
         auto wound_header = version_header;
-        uint32_t tuple_retire_num = 0;
-        while (wound_header){
-            if (wound_header->retire == nullptr) break;
+        while (wound_header) {
+            if (wound_header->retire == nullptr && wound_header->type == XP) break;
             if (wound_header->type == AT) {
                 wound_header = wound_header->next;
                 continue;
             }
 
             auto write_txn_ = wound_header->retire;
-            tuple_retire_num ++;
-            //if find a higher write txn
-            if (write_txn_ != nullptr && write_txn_->status == RUNNING){
-                if (a_higher_than_b(curr_txn->get_ts(), write_txn_->get_ts())){
-                    lower_than_me.push_back(write_txn_);
+            if (write_txn_ != nullptr  ) {
+                if (a_higher_than_b(curr_txn->get_ts(), write_txn_->get_ts())) {
+                    lower_than_me.push_back(wound_header);
                 }
             }
 
             wound_header = wound_header->next;
         }
 
-        if (lower_than_me.size() <= 0) return false;
+        if (owner != nullptr && owner->status == LOCK_OWNER ) {
+            if (owner->txn != nullptr) {
+                auto own_ts = owner->txn->get_ts();
+                if (own_ts == 0 || a_higher_than_b(curr_txn->get_ts(), own_ts)) {
+                    lower_than_me.push_back(owner->access->tuple_version);
+                }
+            }
+        }
 
-        bool rebirth = true;
-//        uint32_t children_num = curr_txn->hotspot_friendly_dependency->size();
-//        uint32_t tuple_owner_num = 0;
-//        if (owner) tuple_owner_num++;
-//        double threold = (double)(children_num + tuple_retire_num + tuple_owner_num) / (g_thread_cnt-1);
-////        printf("threold:%f, \n", threold);
-//        if (threold > 0.05){
-//            rebirth = false;
-//        }
+        if (lower_than_me.empty()) return false;
 
 #if REBIRTH
-//if (rebirth){
+        retry:
         uint64_t starttimeRB = get_sys_clock();
-        //2. use Kahn's algorithm for topologicalSort
-        if (curr_txn->status == ABORTED || curr_txn->rr_dependency->empty()) return false;
-        // build dependent graph
-        auto *adjacencyList = new std::unordered_map<uint64_t, std::vector<txn_man*> *>(); // to<-from
-        auto ret = buildGraph(adjacencyList, curr_txn);
+        if (curr_txn->status == ABORTED || curr_txn->children.empty()) return false;
+        auto *adjacencyList = new std::unordered_map<uint64_t, std::set<txn_man*> *>(); // to<-from
+        auto ret = curr_txn->buildGraph(adjacencyList, curr_txn);
         if (!ret) return false;
-        auto *sortedOrder = new std::vector<uint64_t>();
-        auto ret1 = topologicalSort(adjacencyList, sortedOrder);
+        // thread id, timestamp, txn version
+        auto *sortedOrder = new std::vector<std::pair<uint64_t, std::pair<uint64_t , uint64_t>>>();
+        auto ret1 = curr_txn->topologicalSort(adjacencyList, sortedOrder, nullptr);
         if (ret1){
-//#if PF_CS
-//            uint64_t time_wound = get_sys_clock();
-//#endif
             curr_txn->set_abort();
 #if PF_CS
-//            INC_STATS(curr_txn->get_thd_id(), time_wound, get_sys_clock() - time_wound);
-            INC_STATS(curr_txn->get_thd_id(), find_circle_abort_depent, 1);
+            INC_STATS(curr_txn->get_thd_id(), blind_kill_count, 1);
             INC_STATS(curr_txn->get_thd_id(), time_rebirth,  get_sys_clock() - starttimeRB);
 #endif
-//#if PF_ABORT
-//            curr_txn->wound = true;
-//#endif
+
             return true;
         }
 
-        //3. do rebirth, detect cycle on the retires and owners
         auto size_dep = lower_than_me.size();
         auto size_sort = sortedOrder->size();
         bool find = false;
         int find_idx = 0;
-#if KEY_ORDER == false
+        // wound the txns whose timestamp larger than me
         if (size_dep > 0){
             for (int i = size_dep - 1; i >= 0; --i){
-                auto dep_txn_o=lower_than_me[i];
+                auto dep_txn_o=lower_than_me[i]->retire;
                 if (dep_txn_o != nullptr) {
                     if (find){
                         curr_txn->wound_txn(dep_txn_o);
-//#if PF_CS
-//                        INC_STATS(curr_txn->get_thd_id(), find_circle_abort_depent, 1);
-//#endif
-//#if PF_ABORT
-//                        dep_txn_o->wound = true;
-//#endif
+#if PF_CS
+                        INC_STATS(curr_txn->get_thd_id(), find_circle_abort_depent, 1);
+#endif
                     }else{
                         for (int j = 0; j < size_sort; ++j) {
-                            if (sortedOrder->at(j) == dep_txn_o->get_thd_id()){
+                            if (sortedOrder->at(j).first == dep_txn_o->get_thd_id()){
                                 curr_txn->wound_txn(dep_txn_o);
+#if PF_CS
+                                INC_STATS(curr_txn->get_thd_id(), find_circle_abort_depent, 1);
+#endif
                                 find = true;
                                 find_idx = i;
-//#if PF_CS
-//                                INC_STATS(curr_txn->get_thd_id(), find_circle_abort_depent, 1);
-//#endif
-//#if PF_ABORT
-//                        dep_txn_o->wound = true;
-//#endif
                             }
                         }
                     }
                 }
             }
-
         }
-#endif
 
-        // 3. do rebirth, update my children' ts
+
 #if NEXT_TS
-        if (size_dep > 0){
+        if (size_dep > 0 && size_sort > 1){
             //option 1: the next TS assigned
-            uint64_t next_ts = glob_manager->get_ts(curr_txn->get_thd_id());
-            curr_txn->set_ts(next_ts);
+            uint64_t next_ts = 0;
             for (auto it = sortedOrder->begin(); it != sortedOrder->end(); ++it) {
-                auto depent_txn_thd_id = *it;
-                auto depent_txn = glob_manager->get_txn_man(depent_txn_thd_id);
-                next_ts = glob_manager->get_ts(depent_txn_thd_id);
-                depent_txn->set_ts(next_ts);
+                auto depent_txn_thd = it->first;
+                auto depent_txn = glob_manager->get_txn_man(depent_txn_thd);
+                if (depent_txn != nullptr){
+                    next_ts = glob_manager->get_ts(depent_txn_thd);
+                    depent_txn->set_ts(next_ts);
+                }
             }
         }
 #else
-        if (size_dep > 0){
+        // rebirth the txns in my children
+        if (size_dep > 0 && size_sort > 1){
             //option 2: just larger than all the conflict txns
             auto max_ts = ts;
-            auto dep_txn_o = lower_than_me[find_idx];
+            auto dep_txn_o = lower_than_me[find_idx]->retire;
             max_ts = std::max(max_ts, dep_txn_o->get_ts());
             auto readers = wound_header->read_queue;
             HReader *read_ = nullptr;
@@ -552,22 +331,26 @@ public:
                 while (true) {
                     if (read_->next == nullptr) break;
                     auto read_txn_ = read_->cur_reader;
-                    if (read_txn_ != nullptr && read_txn_->status == RUNNING) {
+                    if (read_txn_ != nullptr && read_txn_->status != ABORTED) {
                         max_ts = std::max(max_ts, read_txn_->get_ts());
                     }
-
                     read_ = read_->next;
                 }
             }
 
-            uint64_t defer_ts = max_ts + 1;
-            curr_txn->set_ts(defer_ts);
+            uint64_t defer_ts = curr_txn->increment_high48(max_ts);
             for (auto it = sortedOrder->begin(); it != sortedOrder->end(); ++it) {
-                auto depent_txn_thd_id = *it;
+                auto depent_txn_thd_id = it->first;
                 auto depent_txn = glob_manager->get_txn_man(depent_txn_thd_id);
-                if (depent_txn->status == RUNNING && depent_txn->get_ts() < defer_ts){
-                    defer_ts++;
-                    depent_txn->set_ts(defer_ts);
+                if (depent_txn != nullptr && depent_txn->status != ABORTED){
+                    if (depent_txn->timestamp_v.load() != it->second.second) {
+                        goto retry;
+                    }
+                    if (depent_txn->get_ts() < defer_ts){
+                        defer_ts++;
+                        depent_txn->set_ts(defer_ts);
+                        depent_txn->timestamp_v.fetch_add(1, std::memory_order_relaxed);
+                    }
                 }
             }
         }
@@ -582,18 +365,21 @@ public:
         }
         return false;
 #else
-//     } else {
         auto size_dep = lower_than_me.size();
-        for (int i = 0; i > size_dep; ++i) {
-            auto dep_txn_o = lower_than_me[i];
+        for (int i = 0; i < size_dep; ++i) {
+            auto version_o = lower_than_me[i];
+            version_o->type = AT;
+            auto dep_txn_o = version_o->retire;
             if (dep_txn_o != nullptr) {
                 dep_txn_o->set_abort();
+                dep_txn_o->lock_abort = true;
+#if PF_CS
+                INC_STATS(curr_txn->get_thd_id(), find_circle_abort_depent, 1);
+#endif
             }
         }
 
         return false;
-//     }
-
 #endif
 
     }

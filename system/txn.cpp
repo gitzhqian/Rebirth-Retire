@@ -24,8 +24,7 @@ void txn_man::init(thread_t * h_thd, workload * h_wl, uint64_t thd_id) {
     abort_chain = 0;
     wound = false;
     wound_cascad = false;
-    start_sys_clock = 0;
-    wait_latch_time = 0;
+//    start_sys_clock = 0;
 #endif
 #if CC_ALG == BAMBOO
     commit_barriers = 0;
@@ -45,24 +44,16 @@ void txn_man::init(thread_t * h_thd, workload * h_wl, uint64_t thd_id) {
         accesses[i] = NULL;
 
 #if CC_ALG == REBIRTH_RETIRE
-    rr_semaphore = 0;
-    rr_serial_id = 0;
-    rr_dependency = new Dependency();
-    ready_abort = false;
-
+    timestamp_v = 0;
     // Optimization for read_only long transaction.
 #if READ_ONLY_OPTIMIZATION_ENABLE
     is_long = false;
     read_only = false;
 #endif
-
-#if VERSION_CHAIN_CONTROL
-    // Restrict the length of version chain.
-    priority = 0;
 #endif
 
-#endif
-
+    wait_latch_time = 0;
+    wait_passive_retire = 0;
     num_accesses_alloc = 0;
 
 #if CC_ALG == TICTOC || CC_ALG == SILO
@@ -141,7 +132,13 @@ uint64_t txn_man::set_next_ts(int n) {
         return 0; // fail to set timestamp
     }
 }
-
+uint64_t txn_man::set_next_ts() {
+    if (atomic_set_ts(h_thd->get_next_ts())) {
+        return this->timestamp;
+    } else {
+        return 0; // fail to set timestamp
+    }
+}
 void txn_man::reassign_ts() {
     this->timestamp = h_thd->get_next_n_ts(1);
 }
@@ -167,30 +164,15 @@ void txn_man::cleanup(RC rc) {
 #if PF_ABORT
     wound = false;
     wound_cascad = false;
-    start_sys_clock = 0;
+//    start_sys_clock = 0;
+#endif
+
     wait_latch_time = 0;
-#endif
-
+    wait_passive_retire = 0;
 #if CC_ALG == REBIRTH_RETIRE
-//    rr_txn_id = 0;
-    rr_serial_id = 0;
-    rr_semaphore = 0;
-    ready_abort = false;
-
-//    if (!adjacencyList.empty()){
-//        adjacencyList.clear();
-//    }
-    if (!rr_dependency->empty()){
-        rr_dependency->clear();
+    if (!parents.empty()){
+        parents.clear();
     }
-    if (!i_dependency_on.empty()){
-        i_dependency_on.clear();
-    }
-
-
-#if DEADLOCK_DETECTION
-    hotspot_friendly_waiting_set.clear();
-#endif
 
     row_cnt = 0;
     wr_cnt = 0;
@@ -201,17 +183,6 @@ void txn_man::cleanup(RC rc) {
     is_long = false;
     read_only = false;
 #endif
-
-#if VERSION_CHAIN_CONTROL
-    // Restrict the length of version chain.
-    priority = 0;
-#endif
-
-    // for READ_WRITE test can pass the assertion
-#if WORKLOAD == TEST
-    status = RUNNING;
-#endif
-//    return;
 #endif
 
 #if CC_ALG == HEKATON || CC_ALG == IC3
@@ -278,7 +249,8 @@ void txn_man::cleanup(RC rc) {
 #if  CC_ALG == REBIRTH_RETIRE
         accesses[rid]->lock_entry->txn = nullptr;
         accesses[rid]->lock_entry->access = nullptr;
-        accesses[rid]->lock_entry->access = nullptr;
+        accesses[rid]->lock_entry->type = LOCK_NONE;
+        accesses[rid]->lock_entry->has_write = false;
         accesses[rid]->orig_row = NULL;
 #endif
 
@@ -314,17 +286,15 @@ void txn_man::cleanup(RC rc) {
 
 #if CC_ALG == BAMBOO                // Make BamBoo support TEST workload
     commit_barriers = 0;
-#if BB_TRACK_DEPENDENS
-    if (!dependend_on_me->empty()){
-                dependend_on_me->clear();
-            }
-            if (!i_depend_set->empty()){
-                i_depend_set->clear();
-            }
+//#if BB_TRACK_DEPENDENS
+//    if (!dependend_on_me->empty()){
+//                dependend_on_me->clear();
+//            }
+//            if (!i_depend_set->empty()){
+//                i_depend_set->clear();
+//            }
+//#endif
 #endif
-#endif
-
-
 }
 
 #if CC_ALG == BAMBOO || CC_ALG == WOUND_WAIT || CC_ALG == WAIT_DIE || CC_ALG == NO_WAIT || CC_ALG == DL_DETECT || CC_ALG == REBIRTH_RETIRE
@@ -583,7 +553,6 @@ row_t * txn_man::get_row(row_t * row, access_t type) {
 #elif CC_ALG == REBIRTH_RETIRE
     auto res_version = (Version*) accesses[row_cnt - 1]->tuple_version;
     return res_version->data;
-
 #else
     return accesses[row_cnt - 1]->data;
 #endif
@@ -731,7 +700,6 @@ RC txn_man::finish(RC rc) {
 }
 
 void txn_man::release() {
-#if CC_ALG !=REBIRTH_RETIRE
     for (int i = 0; i < num_accesses_alloc; i++) {
     #if CC_ALG == BAMOO || CC_ALG == NO_WAIT || CC_ALG == WOUND_WAIT || CC_ALG == WAIT_DIE || CC_ALG == DL_DETEC
         delete accesses[i]->lock_entry;
@@ -739,7 +707,6 @@ void txn_man::release() {
         mem_allocator.free(accesses[i], 0);
     }
     mem_allocator.free(accesses, 0);
-#endif
 #if LATCH == LH_MCSLOCK
     delete mcs_node;
 #endif

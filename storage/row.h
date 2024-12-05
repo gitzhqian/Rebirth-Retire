@@ -43,6 +43,8 @@ class Row_ic3;
 struct LockEntry;
 #elif CC_ALG == BAMBOO
 struct BBLockEntry;
+#elif CC_ALG == REBIRTH_RETIRE
+struct LockEntry;
 #endif
 
 class row_t
@@ -104,6 +106,8 @@ public:
     row_t * orig;
     void init_accesses(Access * access);
     Access * txn_access; // only used when row is a local copy
+#elif CC_ALG == REBIRTH_RETIRE
+    RC retire_row(LockEntry * lock_entry);
 #endif
     RC get_row(access_t type, txn_man * txn, row_t *& row, Access * access=NULL);
 //    RC get_row(access_t type, txn_man * txn, row_t *& row, Access *& access);

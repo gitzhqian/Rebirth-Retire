@@ -7,6 +7,7 @@
 #include <stack>
 #include "manager.h"
 #include "row.h"
+#include <atomic>
 //#include <unordered_set>
 //#include "tbb/tbb.h"
 
@@ -127,9 +128,8 @@ public:
     uint8_t             padding0[64 - sizeof(bool)*2 - sizeof(status_t)- sizeof(uint64_t)];
     bool                wound;
     bool                wound_cascad;
-    uint64_t            start_sys_clock ;
-    uint64_t            wait_latch_time;
-    void  insert_wound(std::string ss);
+//    uint64_t            start_sys_clock ;
+    void                insert_wound(std::string ss);
 #else
     uint8_t             padding0[64 - sizeof(bool)*2 - sizeof(status_t)];
 #endif
@@ -137,6 +137,10 @@ public:
 
     // [BAMBOO]
     ts_t volatile       timestamp;
+
+    std::atomic<uint64_t>   timestamp_v;
+    uint64_t                wait_latch_time;
+    uint64_t                wait_passive_retire;
 
     uint8_t             padding1[64 - sizeof(ts_t)];
     // share its own cache line since it happens tooooo frequent.
@@ -173,27 +177,14 @@ public:
 #endif
 
 #if CC_ALG == REBIRTH_RETIRE
-    struct dep_element{
-        txn_man* dep_txn;
-        uint64_t dep_txn_id;             // the txn_id of retire_txn, used in writing phase to avoid wrong semaphore--
-        DepType dep_type;
-    };
-    typedef  tbb::concurrent_vector<dep_element> Dependency;
-    uint64_t               rr_serial_id;
-    uint64_t volatile      rr_semaphore;
-    bool volatile          ready_abort;
-    tbb::concurrent_unordered_multimap<txn_man*, DepType> i_dependency_on;
-    bool volatile          has_conflict;
-//    uint64_t               wound_txn_id;
-//    std::unordered_map<txn_man *, std::vector<uint64_t> *> *graph_ ;
-
 #if READ_ONLY_OPTIMIZATION_ENABLE
     // Optimization for read_only long transaction.
     bool                is_long;
     bool                read_only;
 #endif
 
-    Dependency          *rr_dependency;
+    tbb::concurrent_unordered_multimap<txn_man*, DepType> parents;
+    tbb::concurrent_vector<std::pair<txn_man *, DepType>> children;
     volatile bool       status_latch;
 
 #elif CC_ALG == TICTOC
@@ -323,6 +314,7 @@ public:
     // dynamically set timestamp
     bool                atomic_set_ts(ts_t ts);
     ts_t			    set_next_ts(int n);
+    ts_t                set_next_ts() ;
     // auto retire
     ts_t                get_exec_time() {return get_sys_clock() - start_ts;};
 #if CC_ALG == BAMBOO
@@ -357,36 +349,23 @@ public:
     RC                  validate_rr(RC rc);
     void                abort_process(txn_man * txn );
 
-//    inline uint64_t 	get_hotspot_friendly_txn_id(){return this->rr_txn_id;}
+    bool                topologicalSort(std::unordered_map<uint64_t, std::set<txn_man*> *> *adjacencyList,
+                                        std::vector<std::pair<uint64_t, std::pair<uint64_t , uint64_t>>> *sortedOrder,
+                                        std::unordered_set<uint64_t> * i_depents);
+    bool                buildGraph(std::unordered_map<uint64_t, std::set<txn_man*> *> *adjacencyList,
+                             txn_man *txn);
+    void                addDependencies(std::unordered_map<uint64_t, std::set<txn_man*>*> *adjacencyList,
+                                  txn_man *txn);
 
-    void PushDependency(txn_man *dep_txn, uint64_t dep_txn_id,DepType depType) {
-        dep_element temp_element = {dep_txn,dep_txn_id,depType};
-        rr_dependency->push_back(temp_element);
+    RC                  retire_row(int access_cnt);
+    uint64_t            increment_high48(uint64_t timestamp) {
+        uint64_t low16 = timestamp & ((1ULL << 16) - 1);  // 低 16 位
+        uint64_t high48 = (timestamp >> 16) & ((1ULL << 48) - 1);  // 高 48 位
+        high48 += 1;
+        uint64_t new_timestamp = (high48 << 16) | low16;
+        return new_timestamp;
     }
-
-    void insert_i_dependency_on(txn_man *dep_txn, DepType depType){
-        i_dependency_on.insert(std::make_pair(dep_txn, depType));
-    }
-
-    void SemaphoreAddOne() {
-        ATOM_ADD(rr_semaphore,1);
-    }
-
-    void SemaphoreSubOne() {
-        if(rr_semaphore == 0) {
-            // This is an aggressive subtraction, this txn_man has already started a new transaction, so semaphore shouldn't be subtracted.
-        }
-        else {
-            auto new_val = ATOM_SUB_FETCH(rr_semaphore,1);
-            if(new_val == UINT64_MAX) {
-                rr_semaphore = 0;
-            }
-        }
-    }
-
 #endif
-
-//    bool insert_hotspot(uint64_t hots) ;
 
 protected:
     void 			    insert_row(row_t * row, table_t * table);
@@ -403,13 +382,13 @@ private:
 inline status_t txn_man::wound_txn(txn_man * txn)
 {
 #if CC_ALG == BAMBOO || CC_ALG == WOUND_WAIT || CC_ALG == HOTSPOT_FRIENDLY
-#if PF_CS
-    uint64_t time_wound = get_sys_clock();
-#endif
+//#if PF_CS
+//    uint64_t time_wound = get_sys_clock();
+//#endif
     auto ret = txn->set_abort();
-#if PF_CS
-    INC_STATS(txn->get_thd_id(), time_wound, get_sys_clock() - time_wound);
-#endif
+//#if PF_CS
+//    INC_STATS(txn->get_thd_id(), time_wound, get_sys_clock() - time_wound);
+//#endif
 
     return ret;
 #else

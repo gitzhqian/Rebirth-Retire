@@ -31,22 +31,22 @@ void thread_t::init(uint64_t thd_id, workload * workload) {
 #if CC_ALG == REBIRTH_RETIRE
     free_list = new std::vector<Version *>();
     total_sz = 900000;
-    for (int i = 0; i < total_sz; ++i) {
-        auto version_reserve = (Version *) _mm_malloc(sizeof(Version), 64);
-        version_reserve->begin_ts = INF;
-        version_reserve->end_ts = INF;
-        version_reserve->dynamic_txn_ts = (volatile ts_t *)_mm_malloc(sizeof(ts_t), 64);
-        version_reserve->dynamic_txn_ts = new ts_t(0);
-        version_reserve->type = XP;
-        version_reserve->read_queue = NULL;
-        version_reserve->prev = NULL;
-        version_reserve->next = NULL;
-        version_reserve->retire = NULL;
-        version_reserve->version_number = 0;
-        version_reserve->data = (row_t *) _mm_malloc(sizeof(row_t), 64);
-        version_reserve->data->init(MAX_TUPLE_SIZE);
-        free_list->push_back(version_reserve);
-    }
+//    for (int i = 0; i < total_sz; ++i) {
+//        auto version_reserve = (Version *) _mm_malloc(sizeof(Version), 64);
+//        version_reserve->begin_ts = INF;
+//        version_reserve->end_ts = INF;
+//        version_reserve->dynamic_txn_ts = (volatile ts_t *)_mm_malloc(sizeof(ts_t), 64);
+//        version_reserve->dynamic_txn_ts = new ts_t(0);
+//        version_reserve->type = XP;
+//        version_reserve->read_queue = NULL;
+//        version_reserve->prev = NULL;
+//        version_reserve->next = NULL;
+//        version_reserve->retire = NULL;
+//        version_reserve->version_number = 0;
+//        version_reserve->data = (row_t *) _mm_malloc(sizeof(row_t), 64);
+//        version_reserve->data->init(MAX_TUPLE_SIZE);
+//        free_list->push_back(version_reserve);
+//    }
 #endif
 }
 
@@ -68,16 +68,6 @@ RC thread_t::run() {
 //    pthread_barrier_wait( &warmup_bar );
     stats.init(get_thd_id());
 //    pthread_barrier_wait( &warmup_bar );
-//    if (stage_cnt == 1){
-//        pthread_barrier_wait( &stage1_barrier );
-//    }
-//    if (stage_cnt == 2){
-//        pthread_barrier_wait( &stage2_barrier );
-//    }
-//    if (stage_cnt == 3){
-//        pthread_barrier_wait( &stage3_barrier );
-//    }
-
 
     set_affinity(get_thd_id());
 
@@ -181,10 +171,11 @@ RC thread_t::run() {
 //#endif
         m_txn->set_ts(0);
         m_txn->status = RUNNING;
-        m_txn->ready_abort = false;
-        m_txn->rr_semaphore = 0;
-        m_txn->i_dependency_on.clear();
-        m_txn->rr_dependency->clear();
+//        m_txn->ready_abort = false;
+//        m_txn->rr_semaphore = 0;
+        m_txn->parents.clear();
+        m_txn->children.clear();
+        m_txn->timestamp_v = 0;
 
 //        assert(m_txn->hotspot_friendly_semaphore == 0);
 //        assert(m_txn->hotspot_friendly_dependency->empty());
@@ -193,6 +184,7 @@ RC thread_t::run() {
         m_txn->set_txn_id(get_thd_id() + thd_txn_id * g_thread_cnt);
         thd_txn_id ++;
         m_txn->wait_latch_time = 0;
+        m_txn->wait_passive_retire = 0;
 
         if ((CC_ALG == HSTORE && !HSTORE_LOCAL_TS)
             || CC_ALG == MVCC
@@ -220,9 +212,9 @@ RC thread_t::run() {
 #endif
 
 #if PF_ABORT
-        m_txn->start_sys_clock = get_sys_clock();
-        m_txn->wound = false;
-        m_txn->wound_cascad = false;
+//        m_txn->start_sys_clock = get_sys_clock();
+//        m_txn->wound = false;
+//        m_txn->wound_cascad = false;
 #endif
 
         if (rc == RCOK)
@@ -288,16 +280,17 @@ RC thread_t::run() {
             }
 #endif
             stats.commit(get_thd_id());
+            auto time_wait_passive = m_txn->wait_passive_retire;
+            DEC_STATS(get_thd_id(), time_get_cs, time_wait_passive);
             txn_cnt ++;
         }
         else if (rc == Abort) {
             INC_STATS(get_thd_id(), time_abort, timespan);
-            auto time_latch_wait = m_txn->wait_latch_time;
             // time abort does not include the lath time and commit time
+            auto time_latch_wait = m_txn->wait_latch_time;
             DEC_STATS(get_thd_id(), time_abort, time_latch_wait);
-
-            auto time_wait_tmp = stats.tmp_stats[get_thd_id()]->time_wait;
             // time abort does not include the lock wait time
+            auto time_wait_tmp = stats.tmp_stats[get_thd_id()]->time_wait;
             DEC_STATS(get_thd_id(), time_abort, time_wait_tmp);
             INC_STATS(get_thd_id(), time_wait, time_wait_tmp);
 //#if PF_ABORT
@@ -408,7 +401,22 @@ ts_t thread_t::get_next_ts() {
         }
         return _curr_ts - 1;
     } else {
+#if CC_ALG == REBIRTH_RETIRE
+        #if NEXT_TS
         _curr_ts = glob_manager->get_ts(get_thd_id());
+        #else
+        _curr_ts ++;
+        uint64_t time = _curr_ts;
+        uint64_t thd_id = get_thd_id();
+        uint64_t time_part = time & ((1ULL << 48) - 1);  // 低 48 位
+        uint64_t thd_id_part = thd_id & ((1ULL << 16) - 1);  // 低 16 位
+        // 将 time 的低 48 位移到高 16 位位置，并加上 thd_id 的低 16 位
+        uint64_t timestamp = (time_part << 16) | thd_id_part;
+        _curr_ts = timestamp;
+        #endif
+#else
+        _curr_ts = glob_manager->get_ts(get_thd_id());
+#endif
         return _curr_ts;
     }
 }

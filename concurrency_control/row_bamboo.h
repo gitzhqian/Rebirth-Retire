@@ -220,7 +220,7 @@ private:
 
     inline static int assign_ts(ts_t ts, txn_man * txn) {
         if (ts == 0) {
-            ts = txn->set_next_ts(1);
+            ts = txn->set_next_ts();
             // if fail to assign, reload
             if ( ts == 0 )
                 ts = txn->get_ts();
