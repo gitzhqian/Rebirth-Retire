@@ -54,6 +54,9 @@ RC ycsb_txn_man::run_txn(base_query * query) {
 #if CC_ALG == REBIRTH_RETIRE
         // REBIRTH_RETIRE: Abort txn actively(before executing next operation)
         if(this->status == ABORTED ){
+#if PF_CS
+            INC_STATS(this->get_thd_id(), find_circle_abort_depent, 1);
+#endif
             rc = Abort;
             goto final;
         }
@@ -139,13 +142,30 @@ RC ycsb_txn_man::run_txn(base_query * query) {
             iteration ++;
             if (req->rtype == RD || req->rtype == WR || iteration == req->scan_len)
                 finish_req = true;
-#if (CC_ALG == REBIRTH_RETIRE) && !PASSIVE_RETIRE
+#if (CC_ALG == REBIRTH_RETIRE)
+            #if PASSIVE_RETIRE
             if (finish_req && (req->rtype == WR)) {
-                if (retire_row(access_id) == Abort) {
-                    return finish(Abort);
+                if (this->lock_abort || this->status == ABORTED){
+                    rc = Abort;
+                    goto final;
+                }else{
+                    accesses[access_id]->lock_entry->has_write = true;
                 }
             }
+            #else
+            if (finish_req && (req->rtype == WR)) {
+                if (this->lock_abort || this->status == ABORTED){
+                    rc = Abort;
+                    goto final;
+                }else{
+                    if (retire_row(access_id) == Abort) {
+                        return finish(Abort);
+                    }
+                }
+            }
+            #endif
 #endif
+
 #if (CC_ALG == BAMBOO) && (THREAD_CNT != 1)
             // retire write txn
             if (finish_req && (req->rtype == WR) && (rid <= retire_threshold)) {
@@ -167,6 +187,7 @@ RC ycsb_txn_man::run_txn(base_query * query) {
     }
     if (rc == Abort) {
        ATOM_CAS(status, RUNNING, ABORTED);
+
     }
 #endif
 

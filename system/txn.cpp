@@ -81,7 +81,7 @@ void txn_man::init(thread_t * h_thd, workload * h_wl, uint64_t thd_id) {
 }
 
 void txn_man::set_txn_id(txnid_t txn_id) {
-#if CC_ALG == WOUND_WAIT || CC_ALG == BAMBOO
+#if CC_ALG == WOUND_WAIT || CC_ALG == BAMBOO || CC_ALG == REBIRTH_RETIRE
     lock_abort = false;
     lock_ready = false;
     status = RUNNING;
@@ -162,42 +162,38 @@ void txn_man::cleanup(RC rc) {
     }
 #endif
 #if PF_ABORT
-    wound = false;
-    wound_cascad = false;
+//    wound = false;
+//    wound_cascad = false;
 //    start_sys_clock = 0;
 #endif
 
     wait_latch_time = 0;
     wait_passive_retire = 0;
-#if CC_ALG == REBIRTH_RETIRE
-    if (!parents.empty()){
-        parents.clear();
-    }
-
-    row_cnt = 0;
-    wr_cnt = 0;
-    insert_cnt = 0;
-    lock_ready = false;
-    // Optimization for read_only long transaction.
-#if READ_ONLY_OPTIMIZATION_ENABLE
-    is_long = false;
-    read_only = false;
-#endif
-#endif
-
-#if CC_ALG == HEKATON || CC_ALG == IC3
-    row_cnt = 0;
-    wr_cnt = 0;
-    insert_cnt = 0;
-#if CC_ALG == IC3
-    access_marker = 0;
-#endif
-    return;
-#endif
+//#if CC_ALG == REBIRTH_RETIRE
+//    row_cnt = 0;
+//    wr_cnt = 0;
+//    insert_cnt = 0;
+//    // Optimization for read_only long transaction.
+//#if READ_ONLY_OPTIMIZATION_ENABLE
+//    is_long = false;
+//    read_only = false;
+//#endif
+//    return;
+//#endif
+//
+//#if CC_ALG == HEKATON || CC_ALG == IC3
+//    row_cnt = 0;
+//    wr_cnt = 0;
+//    insert_cnt = 0;
+//#if CC_ALG == IC3
+//    access_marker = 0;
+//#endif
+//    return;
+//#endif
 
     // go through accesses and release
     for (int rid = row_cnt - 1; rid >= 0; rid --) {
-#if (CC_ALG == WOUND_WAIT) || (CC_ALG == BAMBOO) ||  CC_ALG == REBIRTH_RETIRE
+#if (CC_ALG == WOUND_WAIT) || (CC_ALG == BAMBOO) || (CC_ALG == REBIRTH_RETIRE)
         if (accesses[rid]->orig_row == NULL) {
             continue;
         }
@@ -235,30 +231,24 @@ void txn_man::cleanup(RC rc) {
         accesses[rid]->orig_row = NULL;
 #elif CC_ALG == WOUND_WAIT
         orig_r->return_row(type, accesses[rid]->data, accesses[rid]->lock_entry);
-            accesses[rid]->orig_row = NULL;
-        #elif CC_ALG == DL_DETECT || CC_ALG == NO_WAIT || CC_ALG == WAIT_DIE
-            if (ROLL_BACK && type == XP) {
-                orig_r->return_row(type, accesses[rid]->orig_data, accesses[rid]->lock_entry);
-            } else {
-                orig_r->return_row(type, accesses[rid]->data, accesses[rid]->lock_entry);
-            }
-        #else
-            orig_r->return_row(type, this, accesses[rid]->data);
-#endif
-
-#if  CC_ALG == REBIRTH_RETIRE
-        accesses[rid]->lock_entry->txn = nullptr;
-        accesses[rid]->lock_entry->access = nullptr;
-        accesses[rid]->lock_entry->type = LOCK_NONE;
-        accesses[rid]->lock_entry->has_write = false;
         accesses[rid]->orig_row = NULL;
+#elif CC_ALG == DL_DETECT || CC_ALG == NO_WAIT || CC_ALG == WAIT_DIE
+        if (ROLL_BACK && type == XP) {
+        orig_r->return_row(type, accesses[rid]->orig_data, accesses[rid]->lock_entry);
+    } else {
+        orig_r->return_row(type, accesses[rid]->data, accesses[rid]->lock_entry);
+    }
+#elif CC_ALG == REBIRTH_RETIRE
+        accesses[rid]->orig_row = NULL;
+#else
+        orig_r->return_row(type, this, accesses[rid]->data);
 #endif
 
 #if COMMUTATIVE_OPS && !COMMUTATIVE_LATCH
         }
 #endif
 
-#if CC_ALG != TICTOC && (CC_ALG != SILO) && (CC_ALG != WOUND_WAIT) && (CC_ALG!= BAMBOO)
+#if CC_ALG != TICTOC && (CC_ALG != SILO) && (CC_ALG != WOUND_WAIT) && (CC_ALG!= BAMBOO) && (CC_ALG!= REBIRTH_RETIRE)
         // invalidate ptr for cc keeping globally visible ptr
             accesses[rid]->data = NULL;
 #endif
@@ -309,8 +299,17 @@ void txn_man::assign_lock_entry(Access * access) {
 #if PF_CS
     INC_STATS(this->get_thd_id(), time_creat_entry, get_sys_clock() - starttime);
 #endif
+#elif  CC_ALG == REBIRTH_RETIRE
+#if PF_CS
+    uint64_t starttime  = get_sys_clock();
+#endif
+    auto lock_entry = (RRLockEntry *) _mm_malloc(sizeof(RRLockEntry), 64);
+    new (lock_entry) RRLockEntry(this, access);
+#if PF_CS
+    INC_STATS(this->get_thd_id(), time_creat_entry, get_sys_clock() - starttime);
+#endif
 #else
-    #if PF_CS
+#if PF_CS
     uint64_t starttime  = get_sys_clock();
 #endif
     auto lock_entry = (LockEntry *) _mm_malloc(sizeof(LockEntry), 64);
@@ -402,7 +401,6 @@ row_t * txn_man::get_row(row_t * row, access_t type) {
 #elif CC_ALG == REBIRTH_RETIRE
         // allocate lock entry as well
         assign_lock_entry(access);
-
 #endif
 
         num_accesses_alloc++;
@@ -443,6 +441,7 @@ row_t * txn_man::get_row(row_t * row, access_t type) {
     accesses[row_cnt]->orig_row = row;
 
     if (rc == Abort) {
+        accesses[row_cnt]->orig_row = NULL;
         return NULL;
     }
     auto temp_version = (Version*) accesses[row_cnt]->tuple_version;

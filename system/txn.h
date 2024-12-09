@@ -25,7 +25,7 @@ struct LockEntry;
 //struct BBLockEntry;
 #elif CC_ALG == REBIRTH_RETIRE
 struct Version;
-struct LockEntry;
+struct RRLockEntry;
 #endif
 
 // each thread has a txn_man.
@@ -49,8 +49,10 @@ public:
 #endif
 #if CC_ALG == BAMBOO
     BBLockEntry * lock_entry;
-#elif CC_ALG == WOUND_WAIT || CC_ALG == WAIT_DIE || CC_ALG == NO_WAIT || CC_ALG == DL_DETECT || CC_ALG == REBIRTH_RETIRE
+#elif CC_ALG == WOUND_WAIT || CC_ALG == WAIT_DIE || CC_ALG == NO_WAIT || CC_ALG == DL_DETECT
     LockEntry * lock_entry;
+#elif CC_ALG == REBIRTH_RETIRE
+    RRLockEntry * lock_entry;
 #elif CC_ALG == TICTOC
     ts_t 		wts;
     ts_t 		rts;
@@ -183,7 +185,7 @@ public:
     bool                read_only;
 #endif
 
-    tbb::concurrent_unordered_multimap<txn_man*, DepType> parents;
+    std::unordered_multimap<txn_man*, DepType> parents;
     tbb::concurrent_vector<std::pair<txn_man *, DepType>> children;
     volatile bool       status_latch;
 
@@ -358,11 +360,15 @@ public:
                                   txn_man *txn);
 
     RC                  retire_row(int access_cnt);
-    uint64_t            increment_high48(uint64_t timestamp) {
+    uint64_t            increment_ts(uint64_t timestamp) {
+#if NEXT_TS
+        uint64_t new_timestamp = timestamp +1;
+#else
         uint64_t low16 = timestamp & ((1ULL << 16) - 1);  // 低 16 位
         uint64_t high48 = (timestamp >> 16) & ((1ULL << 48) - 1);  // 高 48 位
         high48 += 1;
         uint64_t new_timestamp = (high48 << 16) | low16;
+#endif
         return new_timestamp;
     }
 #endif
@@ -381,15 +387,8 @@ private:
 
 inline status_t txn_man::wound_txn(txn_man * txn)
 {
-#if CC_ALG == BAMBOO || CC_ALG == WOUND_WAIT || CC_ALG == HOTSPOT_FRIENDLY
-//#if PF_CS
-//    uint64_t time_wound = get_sys_clock();
-//#endif
+#if CC_ALG == BAMBOO || CC_ALG == WOUND_WAIT || CC_ALG == REBIRTH_RETIRE
     auto ret = txn->set_abort();
-//#if PF_CS
-//    INC_STATS(txn->get_thd_id(), time_wound, get_sys_clock() - time_wound);
-//#endif
-
     return ret;
 #else
     return ABORTED;

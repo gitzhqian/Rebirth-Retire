@@ -56,94 +56,34 @@ struct Version {
     }
 };
 
+struct RRLockEntry {
+    txn_man * txn;
+    Access * access;
+    lock_t type;
+    bool has_write;
+    lock_status status;
+    RRLockEntry(txn_man * t, Access * a): txn(t), access(a), type(LOCK_NONE),
+                                        status(LOCK_DROPPED) {};
+};
+
 
 class Row_rr {
 public:
     void init(row_t *row);
     RC access(txn_man *txn, TsType type, Access *access);
-    RC active_retire(LockEntry * entry);
-    bool bring_next(txn_man * txn);
+    RC active_retire(RRLockEntry * entry);
+    bool bring_next(txn_man * txn, txn_man * curr);
 
     volatile bool blatch;
     Version *version_header;              // version header of a row's version chain (N2O)
 //    std::map<uint64_t, txn_man *> *wait_list;
-    LockEntry * waiters_head;
-    LockEntry * waiters_tail;
-    volatile LockEntry * owner;
+//    LockEntry * waiters_head;
+//    LockEntry * waiters_tail;
+    std::list<RRLockEntry *> *entry_list;
+    RRLockEntry * owner;
 //    volatile txn_man * owner;
     UInt32 waiter_cnt;
     UInt32 retired_cnt;
-
-    inline LockEntry *  get_entry(Access * access) {
-        LockEntry * entry = access->lock_entry;
-        entry->next = NULL;
-        entry->prev = NULL;
-        entry->status = LOCK_DROPPED;
-        entry->has_write = false;
-        return entry;
-    }
-
-    inline bool bring_out_waiter(LockEntry * entry, txn_man * txn) {
-//        printf("before waiter_cnt:%u, \n", waiter_cnt);
-        LIST_RM(waiters_head, waiters_tail, entry, waiter_cnt);
-        if (entry->txn != nullptr){
-            entry->txn->lock_ready = true;
-        }
-//        printf("after waiter_cnt:%u, \n", waiter_cnt);
-
-        if (txn == entry->txn) {
-            return true;
-        }
-        return false;
-    };
-
-
-    // push txn entry into waiter list, ordered by timestamps, ascending
-    inline void add_to_waiters(ts_t ts, LockEntry * to_insert) {
-        LockEntry * en = waiters_head;
-        uint32_t traverse_sz = 0;
-        bool find = false;
-        while (en != NULL) {
-            if (traverse_sz > waiter_cnt) {
-                break;
-            }
-            if (ts < en->txn->get_ts()){
-                find = true;
-                break;
-            }
-            traverse_sz++;
-            en = en->next;
-        }
-        if (find) {
-            LIST_INSERT_BEFORE(en, to_insert);
-            if (en == waiters_head){
-                waiters_head = to_insert;
-            }
-        } else {
-            LIST_PUT_TAIL(waiters_head, waiters_tail, to_insert);
-        }
-
-        to_insert->status = LOCK_WAITER;
-        to_insert->txn->lock_ready = false;
-        waiter_cnt++;
-        assert(ts != 0);
-    };
-
-    inline LockEntry * find_write_in_waiter(ts_t ts) {
-        LockEntry * read = nullptr;
-        LockEntry * en = waiters_head;
-        for (UInt32 i = 0; i < retired_cnt; i++) {
-            if ((en->type == LOCK_EX) && (en->txn != nullptr) && (en->txn->get_ts() < ts)) {
-                if (en->txn->status != ABORTED ) {
-                    read = en;
-                    break;
-                }
-            }
-            en = en->next;
-        }
-
-        return read;
-    }
 
 #if LATCH == LH_SPINLOCK
     pthread_spinlock_t * spinlock_row;
@@ -170,6 +110,232 @@ public:
 #endif
         }
     };
+
+    inline RRLockEntry *  get_entry(Access * access) {
+        RRLockEntry * entry = access->lock_entry;
+        entry->status = LOCK_DROPPED;
+        entry->has_write = false;
+        entry->type = LOCK_NONE;
+        return entry;
+    }
+
+    inline void list_rm(RRLockEntry* entry) {
+        if (entry == nullptr) {
+            return;  // 如果传入的 entry 为 nullptr，直接返回
+        }
+
+        for (auto it = entry_list->begin(); it != entry_list->end(); ) {
+            // 检查 (*it) 和 (*it)->txn 是否为 nullptr
+            if ((*it) != nullptr && (*it)->txn != nullptr) {
+                // 检查 txn 的线程 ID 是否匹配
+                if ((*it)->txn->get_thd_id() == entry->txn->get_thd_id()) {
+                    it = entry_list->erase(it);  // 删除元素并返回下一个有效的迭代器
+                    if (waiter_cnt > 0) {
+                        waiter_cnt--;  // 保证 waiter_cnt 不为负
+                    }
+                } else {
+                    ++it;  // 如果没有删除元素，则继续迭代
+                }
+            } else {
+                ++it;  // 如果 (*it) 或 (*it)->txn 为 nullptr，则跳过此元素
+            }
+        }
+    }
+
+    inline void list_rm() {
+        // 直接使用 entry_list.size() 来避免依赖外部计算的 sz
+        for (auto it = entry_list->begin(); it != entry_list->end(); ) {
+            // 如果元素为空，直接删除它
+            if (*it == nullptr) {
+                it = entry_list->erase(it);  // 删除空元素，it 被更新为下一个有效迭代器
+                // 减少 waiter_cnt，但保证 waiter_cnt 不小于 0
+                if (waiter_cnt > 0) {
+                    waiter_cnt--;
+                }
+            } else {
+                auto status_ = (*it)->status;
+                // 如果元素的状态是 LOCK_OWNER, LOCK_RETIRED, 或 LOCK_DROPPED，则删除
+                if (status_ == LOCK_OWNER || status_ == LOCK_RETIRED || status_ == LOCK_DROPPED) {
+                    it = entry_list->erase(it);  // 删除元素，it 被更新为下一个有效迭代器
+                    // 减少 waiter_cnt，但保证 waiter_cnt 不小于 0
+                    if (waiter_cnt > 0) {
+                        waiter_cnt--;
+                    }
+                } else {
+                    ++it; // 如果没有删除元素，则继续迭代
+                }
+            }
+        }
+    }
+
+    bool bring_out_waiter(RRLockEntry * entry, txn_man * txn) {
+        bool result = false;
+        if (entry->txn != nullptr && !entry->txn->lock_abort){
+            entry->txn->lock_ready = true;
+            if (entry->type == LOCK_EX ){
+                entry->status = LOCK_OWNER;
+            }else {
+                entry->status = LOCK_RETIRED;
+            }
+
+            if (txn == entry->txn) {
+                result = true;
+            }
+        }
+
+        return result;
+    };
+    void bring_out_waiter(RRLockEntry * entry ) {
+        list_rm ( entry);
+
+        entry->access = nullptr;
+        entry->status = LOCK_DROPPED;
+        entry->type = LOCK_NONE;
+    };
+
+    // push txn entry into waiter list, ordered by timestamps, ascending
+    inline void add_to_waiters(ts_t ts, RRLockEntry* to_insert) {
+        assert(to_insert != nullptr);
+        assert(to_insert->txn != nullptr);
+
+        bool find = false;
+        RRLockEntry* en = nullptr;
+        auto insert_before = entry_list->begin();
+
+        // traverse the wait list, find the insert position
+        for (auto it = entry_list->begin(); it != entry_list->end(); ++it) {
+            en = *it;
+
+            if (en == nullptr) {
+                continue;
+            }
+            if (en->txn == nullptr) {
+                continue;
+            }
+
+            if (en->access != nullptr) {
+                if (en->txn != nullptr && !en->txn->lock_abort  ) {
+                    if ( ts < en->txn->get_ts()) {
+                        find = true;
+                        insert_before = it;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (!find) {
+            entry_list->push_back(to_insert);   // insert the wait tail
+        } else {
+            entry_list->insert(insert_before, to_insert);  // insert the find position
+        }
+
+        to_insert->status = LOCK_WAITER;
+        to_insert->txn->lock_ready = false;
+        waiter_cnt++;
+
+        assert(ts != 0);
+    };
+
+    inline RRLockEntry * find_write_in_waiter(ts_t ts) {
+        RRLockEntry * read = nullptr;
+        RRLockEntry * en = nullptr;
+        for (auto it = entry_list->begin(); it != entry_list->end(); ++it) {
+            en = *it;
+            if (en->type == LOCK_EX){
+                if ( (en->txn != nullptr) && (en->txn->get_ts() < ts)){
+                    read = en;
+                    break;
+                }
+            }
+        }
+
+        return read;
+    }
+
+    // GC
+    void remove_tombstones() {
+        // remove waiters
+        list_rm();
+
+        // remove owner
+        if (owner != nullptr) {
+            if (owner->access == nullptr){
+                owner = nullptr;
+            } else {
+                if (owner->txn != nullptr && owner->txn->status == ABORTED) {
+                    owner = nullptr;
+                }
+            }
+        }
+
+        // remove retired versions
+        assert(version_header != nullptr);
+        while (version_header) {
+            // Check conditions for skipping this version
+            if (version_header->type == XP ) {
+                break;
+            }
+
+            if (version_header->type == AT ) {
+                // If owner is null or has no access, just remove version header
+                if (owner == nullptr) {
+                    version_header = version_header->next;
+                    if (version_header != nullptr) {
+                        version_header->prev = nullptr;  // Avoid null pointer dereferencing
+                    }
+                } else {
+                    // Otherwise, update the owner's access and remove version header
+                    if (owner->access!= nullptr){
+                        if (owner->access->tuple_version->next == version_header){
+                            owner->access->tuple_version->next = version_header->next;
+                        }
+                    }
+                    version_header = version_header->next;
+                    if (version_header != nullptr) {
+                        version_header->prev = nullptr;  // Avoid null pointer dereferencing
+                    }
+                }
+            } else {
+                break; // Exit if conditions are not met for removal
+            }
+        }
+
+        assert(version_header != nullptr);
+    }
+
+    void release_row(access_t type, RRLockEntry * entry, Version * new_version, RC rc, txn_man *curr) {
+        if (rc == RCOK){
+            if (entry->type == LOCK_EX && entry->status == LOCK_OWNER){
+                owner = nullptr;
+            } else {
+                assert(entry->status == LOCK_RETIRED);
+            }
+        } else {
+            if (type == WR ){
+                if (owner != nullptr){
+                    if ( entry->txn->get_thd_id() == owner->txn->get_thd_id()){
+                        owner = nullptr;
+                    }
+                }
+
+                if (entry->status == LOCK_WAITER){
+                    bring_out_waiter( entry ) ;
+                }
+
+                new_version->type = AT;
+//            new_version->retire = nullptr;
+            } else {
+                if (entry->status == LOCK_WAITER){
+                    bring_out_waiter( entry ) ;
+                }
+            }
+        }
+
+        if (!owner){
+            bring_next(nullptr, curr);
+        }
+    }
 
     // check priorities, timestamps
     inline static bool a_higher_than_b(ts_t a, ts_t b) {
@@ -198,32 +364,10 @@ public:
         return ts;
     };
 
-    // GC
-    inline void remove_tombstones() {
-        if (owner != nullptr && (owner->access->tuple_version->type == AT || (owner->txn != nullptr && owner->txn->status == ABORTED))){
-            owner = nullptr;
-        }
-        while (version_header) {
-            if (version_header->type == XP || (version_header->type == WR && version_header->retire->status != ABORTED)){
-                break;
-            }
-            if (version_header->type == AT || (version_header->retire != nullptr && version_header->retire->status == ABORTED)) {
-                if (owner == nullptr){
-                    version_header = version_header->next;
-                    version_header->prev = nullptr;
-                }else{
-                    owner->access->tuple_version->next = version_header->next;
-                    version_header = version_header->next;
-                    version_header->prev = nullptr;
-                }
-            }
-        }
-    }
-
     bool wound_rebirth(ts_t ts, txn_man *curr_txn, TsType type) {
         //1. check the conflicts
         // find txns whose timestamp priority lower than me
-        auto lower_than_me = std::vector<Version *>();
+        std::vector<Version *> lower_than_me;
         auto wound_header = version_header;
         while (wound_header) {
             if (wound_header->retire == nullptr && wound_header->type == XP) break;
@@ -246,7 +390,9 @@ public:
             if (owner->txn != nullptr) {
                 auto own_ts = owner->txn->get_ts();
                 if (own_ts == 0 || a_higher_than_b(curr_txn->get_ts(), own_ts)) {
-                    lower_than_me.push_back(owner->access->tuple_version);
+                    if (owner->access != nullptr){
+                        lower_than_me.push_back(owner->access->tuple_version);
+                    }
                 }
             }
         }
@@ -265,32 +411,37 @@ public:
         auto ret1 = curr_txn->topologicalSort(adjacencyList, sortedOrder, nullptr);
         if (ret1){
             curr_txn->set_abort();
+            curr_txn->lock_abort = true;
 #if PF_CS
             INC_STATS(curr_txn->get_thd_id(), blind_kill_count, 1);
             INC_STATS(curr_txn->get_thd_id(), time_rebirth,  get_sys_clock() - starttimeRB);
 #endif
-
             return true;
         }
 
-        auto size_dep = lower_than_me.size();
-        auto size_sort = sortedOrder->size();
+        int size_dep = lower_than_me.size();
+        int size_sort = sortedOrder->size();
         bool find = false;
         int find_idx = 0;
         // wound the txns whose timestamp larger than me
         if (size_dep > 0){
             for (int i = size_dep - 1; i >= 0; --i){
-                auto dep_txn_o=lower_than_me[i]->retire;
+                auto version_o = lower_than_me[i];
+                auto dep_txn_o = version_o->retire;
                 if (dep_txn_o != nullptr) {
                     if (find){
+                        version_o->type = AT;
                         curr_txn->wound_txn(dep_txn_o);
+                        dep_txn_o->lock_abort = true;
 #if PF_CS
                         INC_STATS(curr_txn->get_thd_id(), find_circle_abort_depent, 1);
 #endif
                     }else{
                         for (int j = 0; j < size_sort; ++j) {
                             if (sortedOrder->at(j).first == dep_txn_o->get_thd_id()){
+                                version_o->type = AT;
                                 curr_txn->wound_txn(dep_txn_o);
+                                dep_txn_o->lock_abort = true;
 #if PF_CS
                                 INC_STATS(curr_txn->get_thd_id(), find_circle_abort_depent, 1);
 #endif
@@ -304,6 +455,7 @@ public:
         }
 
 
+        // rebirth the txns in my children
 #if NEXT_TS
         if (size_dep > 0 && size_sort > 1){
             //option 1: the next TS assigned
@@ -318,12 +470,17 @@ public:
             }
         }
 #else
-        // rebirth the txns in my children
         if (size_dep > 0 && size_sort > 1){
             //option 2: just larger than all the conflict txns
             auto max_ts = ts;
-            auto dep_txn_o = lower_than_me[find_idx]->retire;
-            max_ts = std::max(max_ts, dep_txn_o->get_ts());
+            auto dep_version = lower_than_me[find_idx];
+            auto dep_txn_o = dep_version->retire;
+            if (dep_txn_o == nullptr){
+                max_ts = std::max(max_ts, dep_version->begin_ts);
+            }else{
+                max_ts = std::max(max_ts, dep_txn_o->get_ts());
+            }
+
             auto readers = wound_header->read_queue;
             HReader *read_ = nullptr;
             if (readers != nullptr) {
@@ -338,7 +495,7 @@ public:
                 }
             }
 
-            uint64_t defer_ts = curr_txn->increment_high48(max_ts);
+            uint64_t defer_ts = curr_txn->increment_ts(max_ts);
             for (auto it = sortedOrder->begin(); it != sortedOrder->end(); ++it) {
                 auto depent_txn_thd_id = it->first;
                 auto depent_txn = glob_manager->get_txn_man(depent_txn_thd_id);
@@ -371,7 +528,7 @@ public:
             version_o->type = AT;
             auto dep_txn_o = version_o->retire;
             if (dep_txn_o != nullptr) {
-                dep_txn_o->set_abort();
+                curr_txn->wound_txn(dep_txn_o);
                 dep_txn_o->lock_abort = true;
 #if PF_CS
                 INC_STATS(curr_txn->get_thd_id(), find_circle_abort_depent, 1);

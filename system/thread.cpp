@@ -170,12 +170,14 @@ RC thread_t::run() {
 //        m_txn->InsertWaitingSet(m_txn->get_hotspot_friendly_txn_id());               // Initialize waiting set
 //#endif
         m_txn->set_ts(0);
-        m_txn->status = RUNNING;
+//        m_txn->status = RUNNING;
 //        m_txn->ready_abort = false;
 //        m_txn->rr_semaphore = 0;
         m_txn->parents.clear();
         m_txn->children.clear();
         m_txn->timestamp_v = 0;
+        m_txn->lock_ready = false;
+        m_txn->lock_abort = false;
 
 //        assert(m_txn->hotspot_friendly_semaphore == 0);
 //        assert(m_txn->hotspot_friendly_dependency->empty());
@@ -293,6 +295,9 @@ RC thread_t::run() {
             auto time_wait_tmp = stats.tmp_stats[get_thd_id()]->time_wait;
             DEC_STATS(get_thd_id(), time_abort, time_wait_tmp);
             INC_STATS(get_thd_id(), time_wait, time_wait_tmp);
+            auto time_wait_passive = m_txn->wait_passive_retire;
+            DEC_STATS(get_thd_id(), time_abort, time_wait_passive);
+            INC_STATS(get_thd_id(), time_wait, time_wait_passive);
 //#if PF_ABORT
 //            if (m_txn->wound){
 //                INC_STATS(get_thd_id(), time_wound, timespan);

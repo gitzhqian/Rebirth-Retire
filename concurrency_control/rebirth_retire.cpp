@@ -17,12 +17,32 @@
 
 
 RC txn_man::retire_row(int access_cnt){
-    return accesses[access_cnt]->orig_row->retire_row(accesses[access_cnt]->lock_entry);
+    if (this->status == ABORTED || this->lock_abort){
+        return Abort;
+    } else {
+        return accesses[access_cnt]->orig_row->retire_row(accesses[access_cnt]->lock_entry);
+    }
 }
 
+bool cycle_recheck(std::unordered_set<uint64_t> *i_depents, txn_man *txn){
+    auto *adjacencyList = new std::unordered_map<uint64_t, std::set<txn_man*> *>(); // to<-from
+    auto ret = txn->buildGraph(adjacencyList, txn);
+    bool cycle = false;
+    std::vector<std::pair<uint64_t, std::pair<uint64_t , uint64_t>>> *sortedOrder;
+    if (ret){
+        sortedOrder = new std::vector<std::pair<uint64_t, std::pair<uint64_t , uint64_t>>>();
+        cycle = txn->topologicalSort(adjacencyList, sortedOrder, i_depents);
+    }
+    if (cycle){
+        return true;
+    }
+
+    return false;
+}
 
 RC txn_man::validate_rr(RC rc) {
     if(rc == Abort || status == ABORTED){
+
         abort_process(this);
         return Abort;
     }
@@ -45,15 +65,15 @@ RC txn_man::validate_rr(RC rc) {
                 uint64_t ts = 0;
                 auto retire_old = old_version->retire;
                 if (retire_old == nullptr){
-                    ts = increment_high48(old_version->begin_ts);
+                    ts = increment_ts(old_version->begin_ts);
                 } else {
-                    ts = increment_high48(retire_old->get_ts());
+                    ts = increment_ts(retire_old->get_ts());
                 }
                 serial_id = std::max(ts, serial_id);
             }
         }
 
-        serial_id =  increment_high48(serial_id);
+        serial_id =  increment_ts(serial_id);
         ts_zero = true;
     }
     assert(serial_id != INF);
@@ -63,21 +83,7 @@ RC txn_man::validate_rr(RC rc) {
     uint32_t i_dependency_semaphore = i_dependency_on_size;
 
     auto *i_depents = new std::unordered_set<uint64_t>();
-    auto *adjacencyList = new std::unordered_map<uint64_t, std::set<txn_man*> *>(); // to<-from
-    auto ret = buildGraph(adjacencyList, this);
-    bool cycle = false;
-    std::vector<std::pair<uint64_t, std::pair<uint64_t , uint64_t>>> *sortedOrder;
-    if (ret){
-        sortedOrder = new std::vector<std::pair<uint64_t, std::pair<uint64_t , uint64_t>>>();
-        cycle = topologicalSort(adjacencyList, sortedOrder, i_depents);
-    }
-    if (cycle){
-#if PF_CS
-        INC_STATS(this->get_thd_id(), blind_kill_count, 1);
-#endif
-        abort_process(this);
-        return Abort;
-    }
+    bool has_check = false;
 
     uint64_t starttime = get_sys_clock();
     while(true) {
@@ -98,9 +104,6 @@ RC txn_man::validate_rr(RC rc) {
 
                 if (depend_txn->status == ABORTED){
                     if (it.second != READ_WRITE_){
-#if PF_CS
-                        INC_STATS(this->get_thd_id(), find_circle_abort_depent, 1);
-#endif
                         this->status = ABORTED;
                         break;
                     } else{
@@ -113,12 +116,21 @@ RC txn_man::validate_rr(RC rc) {
                     if (depend_txn_ts < serial_id){
                         decrease_semaphore(i_dependency_semaphore);
                     }else {
+                        if (!has_check){
+                            has_check = true;
+                            auto has_cycle = cycle_recheck(i_depents, this);
+                            if (has_cycle){
+                                this->status = ABORTED;
+                                break;
+                            }
+                        }
+
                         auto itr = i_depents->find(depend_txn->get_txn_id());
                         if ( itr != i_depents->end()) {
                             this->status = ABORTED;
                             break;
                         }else{
-                            serial_id = increment_high48(depend_txn_ts) ;
+                            serial_id = increment_ts(depend_txn_ts) ;
                             decrease_semaphore(i_dependency_semaphore);
                         }
                     }
@@ -152,7 +164,7 @@ RC txn_man::validate_rr(RC rc) {
         auto new_version = accesses[rid]->tuple_version;
         assert(new_version->begin_ts == UINT64_MAX && new_version->retire == this);
         auto old_version = accesses[rid]->old_version;
-        if ((old_version->retire != nullptr && old_version->retire->status == ABORTED) || old_version->type == AT){
+        if (old_version->type == AT){
             while (true){
                 old_version = old_version->next;
                 if (old_version != nullptr &&
@@ -163,11 +175,13 @@ RC txn_man::validate_rr(RC rc) {
         }
         // this is because, when i read the old version, it is validating, has no dependency
         if (serial_id <= old_version->begin_ts){
-            if (old_version->retire != nullptr){
-                serial_id = increment_high48(old_version->retire->get_ts());
-            }
             if (old_version->type == XP){
-                serial_id = increment_high48(old_version->begin_ts);
+                serial_id = increment_ts(old_version->begin_ts);
+            } else if (old_version->type == WR){
+                auto retire_txn = old_version->retire;
+                if (retire_txn != nullptr){
+                    serial_id = increment_ts(retire_txn->get_ts());
+                }
             }
         }
         old_version->end_ts = serial_id;
@@ -175,14 +189,9 @@ RC txn_man::validate_rr(RC rc) {
         new_version->retire = nullptr;
         new_version->type = XP;
 
-        if (accesses[rid]->orig_row->manager->owner != nullptr && this == accesses[rid]->orig_row->manager->owner->txn ){
-            accesses[rid]->orig_row->manager->owner = nullptr;
-        }
-
-        //bring next
-        if (accesses[rid]->orig_row->manager->owner == nullptr || accesses[rid]->orig_row->manager->owner->status == LOCK_RETIRED){
-            accesses[rid]->orig_row->manager->bring_next(nullptr);
-        }
+        auto en = accesses[rid]->lock_entry;
+        auto type = accesses[rid]->type;
+        accesses[rid]->orig_row->manager->release_row(type, en, nullptr, RCOK, this);
 
         accesses[rid]->orig_row->manager->unlock_row(this);
     }
@@ -195,8 +204,8 @@ RC txn_man::validate_rr(RC rc) {
 
     ATOM_CAS(status, validating, COMMITED);
 
-    this->parents.clear();
-    this->children.clear();
+    parents.clear();
+    children.clear();
 
     return rc;
 }
@@ -205,30 +214,27 @@ void txn_man::abort_process(txn_man * txn ){
     auto status_ = txn->status;
     ATOM_CAS(status, status_, ABORTED);
     txn->lock_abort = true;
+    COMPILER_BARRIER
 
     for(int rid = 0; rid < row_cnt; rid++) {
-        accesses[rid]->lock_entry->status = LOCK_DROPPED;
-        if (accesses[rid]->type == RD) {
-            continue;
-        }
+//        if (accesses[rid]->type == RD) {
+//            continue;
+//        }
 
-        accesses[rid]->orig_row->manager->lock_row(this);
-        auto new_version = (Version *) accesses[rid]->tuple_version;
-        if (accesses[rid]->orig_row->manager->owner != nullptr && this == accesses[rid]->orig_row->manager->owner->txn ){
-            accesses[rid]->orig_row->manager->owner = nullptr;
-        }
-//            ATOM_CAS(new_version->type, WR, AT);
-        new_version->type = AT;
-        new_version->retire = nullptr;
-        accesses[rid]->orig_row->manager->unlock_row(this);
+//        assert(accesses[rid]->type == WR);
+        accesses[rid]->orig_row->manager->lock_row(txn);
+        auto en = accesses[rid]->lock_entry;
+        auto version = accesses[rid]->tuple_version;
+        auto type = accesses[rid]->type;
+        accesses[rid]->orig_row->manager->release_row(type, en, version, Abort, this);
+        accesses[rid]->orig_row->manager->unlock_row(txn);
     }
 
     for(auto & dep_pair : children){
         // only inform the txn which wasn't aborted
-        if (dep_pair.second == READ_WRITE_){
-        } else{
+        if (dep_pair.second != READ_WRITE_){
             if (dep_pair.first != nullptr){
-                if (dep_pair.first->status == RUNNING  || dep_pair.first->status == validating) {
+                if (dep_pair.first->status == RUNNING  ) {
                     dep_pair.first->set_abort(5);
                     dep_pair.first->lock_abort = true;
 #if PF_CS
@@ -238,13 +244,15 @@ void txn_man::abort_process(txn_man * txn ){
             }
         }
     }
+
+    parents.clear();
     children.clear();
 }
 
 
 void txn_man::addDependencies(std::unordered_map<uint64_t, std::set<txn_man*>*> *adjacencyList,
                               txn_man *txn) {
-    auto direct_depents = txn->children;
+    auto direct_depents = (txn->children);
     auto *curr_depts = new std::set<txn_man *>();
     adjacencyList->insert(std::make_pair(txn->get_thd_id(), curr_depts));
 
@@ -275,7 +283,7 @@ void txn_man::addDependencies(std::unordered_map<uint64_t, std::set<txn_man*>*> 
                 auto *curr_depts = new std::set<txn_man *>();
                 adjacencyList->insert(std::make_pair(dep_txn_->get_thd_id(), curr_depts));
 
-                auto dep_txn_deps = dep_txn_->children;
+                auto dep_txn_deps = (dep_txn_->children);
                 if (!dep_txn_deps.empty()){
                     for (auto &dep_: dep_txn_deps) {
                         if (dep_.first != nullptr && dep_.first->status == RUNNING){
@@ -382,6 +390,8 @@ bool txn_man::topologicalSort(std::unordered_map<uint64_t, std::set<txn_man*> *>
             }
         }
     }
+
+    if (inDegree.empty() || zeroInDegreeQueue.empty()) return false;
 
     // 检查是否有环
     if (sortedOrder->size() != nodes.size()) {

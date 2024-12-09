@@ -238,7 +238,7 @@ RC row_t::retire_row(BBLockEntry * lock_entry) {
 }
 #endif
 #if CC_ALG == REBIRTH_RETIRE
-RC row_t::retire_row(LockEntry * lock_entry) {
+RC row_t::retire_row(RRLockEntry * lock_entry) {
     return this->manager->active_retire(lock_entry);
 }
 #endif
@@ -299,8 +299,19 @@ RC row_t:: get_row(access_t type, txn_man * txn, row_t *& row, Access * access) 
         INC_STATS(txn->get_thd_id(), wait_cnt, 1);
         while (!txn->lock_ready && !txn->lock_abort)
         {
-        #if CC_ALG == WAIT_DIE || (CC_ALG == WOUND_WAIT) || (CC_ALG == BAMBOO) || (CC_ALG == REBIRTH_RETIRE)
+        #if CC_ALG == WAIT_DIE || (CC_ALG == WOUND_WAIT) || (CC_ALG == BAMBOO)
             continue;
+        #elif CC_ALG == REBIRTH_RETIRE
+            #if !PASSIVE_RETIRE
+            uint64_t now = get_sys_clock();
+            if (now - starttime > g_timeout ) {
+                txn->lock_abort = true;
+                txn->status = ABORTED;
+                break;
+            }
+            #endif
+            continue;
+
         #elif CC_ALG == DL_DETECT
             uint64_t last_detect = starttime;
           uint64_t last_try = starttime;
@@ -322,20 +333,21 @@ RC row_t:: get_row(access_t type, txn_man * txn, row_t *& row, Access * access) 
               else if (ok == 16)
           last_try = now;
             }
-        if (dep_added) {
-          ok = dl_detector.detect_cycle(txn->get_txn_id());
-          if (ok == 16)  // failed to lock the deadlock detector
-            last_try = now;
-          else if (ok == 0)
-            last_detect = now;
-              else if (ok == 1) {
-            last_detect = now;
-              }
+          if (dep_added) {
+              ok = dl_detector.detect_cycle(txn->get_txn_id());
+              if (ok == 16)  // failed to lock the deadlock detector
+                last_try = now;
+              else if (ok == 0)
+                last_detect = now;
+                  else if (ok == 1) {
+                last_detect = now;
+                  }
             }
           } else
             PAUSE
         #endif
         }
+
         if (txn->lock_ready) {
           rc = RCOK;
         } else if (txn->lock_abort) {

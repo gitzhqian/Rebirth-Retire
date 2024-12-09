@@ -30,8 +30,6 @@ RC tpcc_txn_man::run_txn(base_query * query) {
     switch (m_query->type) {
         case TPCC_PAYMENT :
             return run_payment(m_query); break;
-        case TPCC_QUERY2 :
-            return run_query2(m_query); break;
         case TPCC_NEW_ORDER :
             return run_new_order(m_query); break;
         case TPCC_ORDER_STATUS :
@@ -134,6 +132,9 @@ RC tpcc_txn_man::run_payment(tpcc_query * query) {
 #if (CC_ALG == BAMBOO) && (THREAD_CNT > 1) && !COMMUTATIVE_OPS
     RETIRE_ROW(row_cnt)
 #endif
+#if CC_ALG == REBIRTH_RETIRE && PASSIVE_RETIRE
+    accesses[row_cnt]->lock_entry->has_write = true;
+#endif
     //get a copy of warehouse name
     tmp_str = r_wh_local->get_value(W_NAME);
     memcpy(w_name, tmp_str, 10);
@@ -185,6 +186,9 @@ RC tpcc_txn_man::run_payment(tpcc_query * query) {
 #endif
 #if (CC_ALG == BAMBOO) && (THREAD_CNT > 1) && !COMMUTATIVE_OPS
     RETIRE_ROW(row_cnt)
+#endif
+#if CC_ALG == REBIRTH_RETIRE && PASSIVE_RETIRE
+    accesses[row_cnt]->lock_entry->has_write = true;
 #endif
     tmp_str = r_dist_local->get_value(D_NAME);
     memcpy(d_name, tmp_str, 10);
@@ -300,6 +304,9 @@ RC tpcc_txn_man::run_payment(tpcc_query * query) {
     }
 #if (CC_ALG == BAMBOO) && (THREAD_CNT > 1)
     RETIRE_ROW(row_cnt)
+#endif
+#if CC_ALG == REBIRTH_RETIRE && PASSIVE_RETIRE
+    accesses[row_cnt]->lock_entry->has_write = true;
 #endif
 
 #if CC_ALG == IC3
@@ -490,6 +497,9 @@ RC tpcc_txn_man::run_new_order(tpcc_query * query) {
     if (retire_row(row_cnt-1) == Abort){
         return finish(Abort);
     }
+#endif
+#if CC_ALG == REBIRTH_RETIRE && PASSIVE_RETIRE
+    accesses[row_cnt-1]->lock_entry->has_write = true;
 #endif
 
 #if CC_ALG == IC3
@@ -855,6 +865,9 @@ RC tpcc_txn_man::run_new_order(tpcc_query * query) {
             return finish(Abort);
         }
 #endif
+#if CC_ALG == REBIRTH_RETIRE && PASSIVE_RETIRE
+    accesses[row_cnt-1]->lock_entry->has_write = true;
+#endif
 
         /*====================================================+
         EXEC SQL INSERT
@@ -1138,7 +1151,9 @@ tpcc_txn_man::run_delivery(tpcc_query * query) {
         if (retire_row(row_cnt-1) == Abort)
             return finish(Abort);
 #endif
-
+#if CC_ALG == REBIRTH_RETIRE && PASSIVE_RETIRE
+    accesses[row_cnt-1]->lock_entry->has_write = true;
+#endif
         uint64_t count = 15;
         double sum_ol_amount;
         auto idx_ordline = _wl->i_orderline;
@@ -1168,6 +1183,9 @@ tpcc_txn_man::run_delivery(tpcc_query * query) {
                 if (retire_row(row_cnt-1) == Abort)
                     return finish(Abort);
 #endif
+#if CC_ALG == REBIRTH_RETIRE && PASSIVE_RETIRE
+    accesses[row_cnt-1]->lock_entry->has_write = true;
+#endif
             }
         }
 
@@ -1195,6 +1213,9 @@ tpcc_txn_man::run_delivery(tpcc_query * query) {
         if (retire_row(row_cnt-1) == Abort)
             return finish(Abort);
 #endif
+#if CC_ALG == REBIRTH_RETIRE && PASSIVE_RETIRE
+    accesses[row_cnt-1]->lock_entry->has_write = true;
+#endif
     }
 
 //*/
@@ -1205,181 +1226,4 @@ tpcc_txn_man::run_delivery(tpcc_query * query) {
 RC
 tpcc_txn_man::run_stock_level(tpcc_query * query) {
     return RCOK;
-}
-
-
-RC tpcc_txn_man::run_query2(tpcc_query * query ) {
-    /*  "query_2": {
-                   "SELECT su_suppkey, su_name,  n_name, i_id, i_name, su_address, su_phone, "
-                    + "su_comment FROM item, supplier, stock, nation, region, "
-                    + "(SELECT s_i_id AS m_i_id, MIN(s_quantity) AS m_s_quantity  FROM stock, "
-                    + "supplier, nation, region  WHERE MOD((s_w_id*s_i_id), 10000)=su_suppkey "
-                    + "AND su_nationkey=n_nationkey AND n_regionkey=r_regionkey "
-                    + "AND r_name LIKE 'Europ%'  GROUP BY s_i_id) m "
-                    + "WHERE i_id = s_i_id  AND MOD((s_w_id * s_i_id), 10000) = su_suppkey "
-                    + "AND su_nationkey = n_nationkey  AND n_regionkey = r_regionkey "
-                    + "AND i_data LIKE '%b'  AND r_name LIKE 'Europ%' "
-                    + "AND i_id=m_i_id  AND s_quantity = m_s_quantity "
-                    + "ORDER BY n_name,  su_name,  i_id"
-     }  */
-//    auto regions_ = _wl->ch_regions;
-//    auto nations_ = _wl->ch_nations;
-//    auto suppliers_ = _wl->ch_suppliers;
-//    auto supplier_item_map = _wl->supp_stock_map;// ,w_id,i_id
-//    uint64_t supplier_num = suppliers_.size();
-//    // Pick a target region
-//    auto target_region = 0;
-////    auto target_region = GetRandomInteger(0, 4);
-//    //	auto target_region = 3;
-//    assert(0 <= target_region and target_region <= 4);
-//    auto stock_index = _wl->i_stock;
-//
-//    uint64_t starttime = get_sys_clock();
-//
-//    // Scan region
-//    for (auto &r_r : regions_) {
-//        uint64_t r_id = r_r.second->region_id;
-//        std::string r_name = r_r.second->region_name;
-//
-//        // filtering region
-//        if (r_name != std::string(regions[target_region])) continue;
-//
-//        // Scan nation
-//        for (auto &r_n : nations_) {
-//            uint64_t n_id = r_n.second->nation_id;
-//            std::string n_name = r_n.second->nation_name;
-//            // filtering nation
-//            if (r_r.second->region_id != r_n.second->region_id) continue;
-//            // Scan suppliers
-//            for (uint64_t i = 0; i < supplier_num; i++) {
-//                auto suppll = suppliers_.find(i);
-//                if (r_n.second->nation_id != suppll->second->su_nation_id) continue;
-//
-//                int64_t min_w_id = 0;
-//                int64_t min_i_id = 0;
-//                int64_t min_s_quant = 0;
-//                int64_t min_s_ytd = 0;
-//                int64_t min_s_ord_cnt = 0;
-//                int64_t min_s_rem_cnt = 0;
-//
-//                // aggregate - finding a stock tuple having min. stock level
-//                int16_t min_qty = std::numeric_limits<int16_t>::max();
-//                // "mod((s_w_id*s_i_id),10000)=su_suppkey"
-//                // items
-//                int64_t supp_id = suppll->second->su_supp_id;
-//                for (auto &it : supplier_item_map[supp_id])  // already know
-//                {
-//                    uint64_t ol_i_id = it.second;
-//                    uint64_t ol_supply_w_id = it.first;
-//
-//                    uint64_t stock_key = stockKey(ol_i_id, ol_supply_w_id); //ol_i_id, ol_supply_w_id
-//                    stock_index = _wl->i_stock;
-//                    itemid_t * stock_item;
-//                    index_read(stock_index, stock_key, wh_to_part(ol_supply_w_id), stock_item);
-//
-//                    auto r_stock = ((row_t *)stock_item->location);
-//                    auto r_stock_local = get_row(r_stock, RD);
-//                    if (r_stock_local == NULL) {
-//#if CC_ALG == REBIRTH_RETIRE
-//                        auto ret = ATOM_CAS(status, RUNNING, ABORTED);
-//                        assert(ret);
-//                        return finish(Abort);
-//#else
-//                        return finish(Abort);
-//#endif
-//                    }
-//
-//                    int64_t s_w_id, s_i_id ,s_quantity ,s_ytd, s_order_cnt, s_remote_cnt ;
-//                    r_stock_local->get_value(S_W_ID, s_w_id);
-//                    r_stock_local->get_value(S_I_ID, s_i_id);
-//                    r_stock_local->get_value(S_QUANTITY, s_quantity);
-//#if !TPCC_SMALL
-//                    r_stock_local->get_value(S_YTD, s_ytd);
-//                    r_stock_local->get_value(S_ORDER_CNT, s_order_cnt);
-//#endif
-//                    r_stock_local->get_value(S_REMOTE_CNT, s_remote_cnt);
-//                    //ASSERT(s_w_id * s_i_id % 10000 == supp_id);
-//                    if (min_qty > s_quantity) {
-//                        min_w_id = s_w_id;
-//                        min_i_id = s_i_id;
-//                        min_s_quant = s_quantity;
-//                        min_s_ytd = s_ytd;
-//                        min_s_ord_cnt = s_order_cnt;
-//                        min_s_rem_cnt = s_remote_cnt;
-//                    }
-//                }
-//
-//                // fetch the (lowest stock level) item info
-//                auto index = _wl->i_item;
-//                uint64_t key =  min_i_id;
-//                auto part_id = 0;
-//                auto item_ = index_read(_wl->i_item, key, 0);
-//
-//                auto r_item = ((row_t *)item_->location);
-//                auto item_row = get_row(r_item, RD);
-//                if (item_row == NULL) {
-//#if CC_ALG == REBIRTH_RETIRE
-//                    auto ret = ATOM_CAS(status, RUNNING, ABORTED);
-//                    assert(ret);
-//                    return finish(Abort);
-//#else
-//                    return finish(Abort);
-//#endif
-//                }
-
-//                if (item_row == NULL) continue;
-//                char *item_data = item_row->data;
-//                char *i_data = item_data + 48;
-//                std::string str_i_data = std::string(i_data, 50);
-//                //  filtering item (i_data like '%b')
-//                auto found = str_i_data.find('b');
-//                if (found != std::string::npos) continue;
-
-                // XXX. read-mostly txn: update stock or item here
-
-//                if (min_s_quant < 100) {
-//                    uint64_t stock_k = stockKey(min_i_id, min_w_id); //item_id, warehouse_id
-//                    auto part_id = wh_to_part(min_w_id);
-//                    stock_index = _wl->i_stock;
-//                    itemid_t * stock_item;
-//                    index_read(stock_index, stock_k, wh_to_part(min_w_id), stock_item);
-//
-//                    auto r_stock = ((row_t *)stock_item->location);
-//                    auto r_stock_local = get_row(r_stock, WR);
-//                    if (r_stock_local == NULL) {
-//                    #if CC_ALG == REBIRTH_RETIRE
-//                            auto ret = ATOM_CAS(status, RUNNING, ABORTED);
-//                            assert(ret);
-//                            return finish(Abort);
-//                    #else
-//                        return finish(Abort);
-//                    #endif
-//                    }
-//
-//                    r_stock_local->set_value(S_QUANTITY, min_s_quant+50);
-//                    r_stock_local->set_value(S_YTD, min_s_ytd);
-//                    r_stock_local->set_value(S_ORDER_CNT, min_s_ord_cnt);
-//                    r_stock_local->set_value(S_REMOTE_CNT, min_s_rem_cnt);
-//
-//                    printf("update stock. \n");
-//
-//                    #if CC_ALG == BAMBOO && (THREAD_CNT != 1)
-//                      if (retire_row(row_cnt-1) == Abort)
-//                          return finish(Abort);
-//                    #endif
-//                }
-
-                /*  cout << k_su.su_suppkey              << ","
-                         << v_su->su_name                << ","
-                         << v_n->n_name                  << ","
-                         << k_i.i_id                     << ","
-                         << v_i->i_name                  << std::endl;  */
-//            }
-//        }
-//    }
-//
-//    uint64_t timespan = get_sys_clock() - starttime;
-////    INC_STATS(get_thd_id(), time_q2, timespan);
-//
-//    return finish(RCOK);
 }
