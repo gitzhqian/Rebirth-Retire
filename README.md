@@ -39,7 +39,8 @@ and the resulting outputs are as follows:
 ```
 
 The following figure presents the results of  the evaluated protocols under the YCSB workloads:
- ![image](https://github.com/user-attachments/files/18627467/figure-as-ycsb.pdf)
+![ycsb results](https://github.com/gitzhqian/Rebirth-Retire/blob/gitzhqian-rebirth-retire/figure-as-ycsb.pdf)
+ 
 
 
     
