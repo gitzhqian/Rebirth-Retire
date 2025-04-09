@@ -221,7 +221,7 @@ RC workload::init_schema(std::string schema_file) {
 			index->init(part_cnt, tables[tname], stoi( items[1] ) * part_cnt);
 	#endif
 #else
-			index->init(part_cnt, tables[tname]);
+			index->init(part_cnt, tables[tname], stoi( items[1] ) * part_cnt);
 #endif
 			indexes[iname] = index;
 		}

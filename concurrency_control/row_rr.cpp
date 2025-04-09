@@ -26,6 +26,17 @@ void Row_rr::init(row_t *row){
     version_header->next = NULL;
     version_header->retire = NULL;
 
+#if PREFETCH
+    prefh_len = 20;
+    prefh_latest = 0;
+    version_prefhs_ = (Version **) _mm_malloc(sizeof(Version *) * prefh_len, 64);
+    for (uint32_t i = 0; i < prefh_len; i++){
+        version_prefhs_[i] = NULL;
+    }
+    version_prefhs_[0] = version_header;
+
+#endif
+
 #if LATCH == LH_SPINLOCK
     spinlock_row = new pthread_spinlock_t;
     pthread_spin_init(spinlock_row, PTHREAD_PROCESS_SHARED);
@@ -38,20 +49,39 @@ void Row_rr::init(row_t *row){
     entry_list = new std::list<RRLockEntry *>();
 }
 
+RC Row_rr::read_committed(txn_man * txn, Version* latest_committed_,
+                          uint64_t start_r_w, Access * access){
+    uint64_t startt_r_w = start_r_w;
+    ts_t ts = txn->get_ts();
+    Version *latest_committed = latest_committed_;
+    if (ts == 0){
+        while (true){
+            if (latest_committed == nullptr){
+                txn->lock_abort = true;
+                return Abort;
+            }
+            if(latest_committed->type == XP){
+                break;
+            }
 
-RC Row_rr::access(txn_man * txn, TsType type, Access * access){
-    // Optimization for read_only long transaction.
-    uint64_t startt_r_w = get_sys_clock();
-    if(txn->is_long || txn->read_only){
-        ts_t ts = txn->get_ts();
-        ts = assign_ts(ts, txn);
-        if (ts >= latest->begin_ts){
-            if (latest->end_ts == INF || ts < latest->end_ts){
-                if(latest->type == XP){
-                    access->tuple_version = latest;
+            latest_committed = latest_committed->next;
+        }
+        assert(latest_committed != nullptr);
+        assert(latest_committed->data != nullptr);
+        ts = latest_committed->begin_ts;
+        txn->set_ts(ts);
+        txn->lock_ready = true;
+        access->tuple_version = latest_committed;
+
+        return RCOK;
+    }else {
+        if (ts >= latest_committed->begin_ts){
+            if (latest_committed->end_ts == INF || ts < latest_committed->end_ts){
+                if(latest_committed->type == XP){
+                    access->tuple_version = latest_committed;
                     txn->lock_ready = true;
-//                    auto max_ts = std::max(latest->begin_ts, ts);
-//                    txn->set_ts(max_ts);
+                    auto max_ts = std::max(latest_committed->begin_ts, ts);
+                    txn->set_ts(max_ts);
 #if PF_CS
                     INC_STATS(txn->get_thd_id(), time_read_write,  (get_sys_clock() - startt_r_w));
                     txn->wait_latch_time = txn->wait_latch_time + (get_sys_clock() - startt_r_w);
@@ -60,34 +90,40 @@ RC Row_rr::access(txn_man * txn, TsType type, Access * access){
                 }
             }
         }else{
-            // prefetching
-            Version* read_only_version = latest;
+            // read history version, use prefetching
+#if PREFETCH
+            uint32_t idx = prefh_latest;
+            __builtin_prefetch(reinterpret_cast<void *>(version_prefhs_[idx]), 0, 1);
+            idx = (idx == 0)? 0 : idx - 1;
+            __builtin_prefetch(reinterpret_cast<void *>(version_prefhs_[idx]), 0, 1);
+#endif
+
             while (true){
-                if (read_only_version == nullptr){
+                if (latest_committed == nullptr){
                     txn->lock_abort = true;
                     return Abort;
                 }
-                if(read_only_version->type == XP){
+                if(latest_committed->type == XP){
 #if PREFETCH
-                    assert(read_only_version->retire == NULL);
-                    access->tuple_version = read_only_version;
-                    break;
-#else
-                    if (ts >= read_only_version->begin_ts){
-                        assert(read_only_version->retire == NULL);
-                        access->tuple_version = read_only_version;
+                    idx = (idx == 0)? 0 : idx - 1;
+                    __builtin_prefetch(reinterpret_cast<void *>(version_prefhs_[idx]), 0, 1);
+                    idx = (idx == 0)? 0 : idx - 1;
+                    __builtin_prefetch(reinterpret_cast<void *>(version_prefhs_[idx]), 0, 1);
+#endif
+                    if (ts >= latest_committed->begin_ts){
+                        assert(latest_committed->retire == NULL);
+                        access->tuple_version = latest_committed;
                         break;
                     }
-#endif
                 }
 
-                read_only_version = read_only_version->next;
+                latest_committed = latest_committed->next;
             }
 
             assert(access->tuple_version != nullptr);
             assert(access->tuple_version->data != nullptr);
-//            auto max_ts = std::max(access->tuple_version->begin_ts, ts);
-//            txn->set_ts(max_ts);
+            auto max_ts = std::max(access->tuple_version->begin_ts, ts);
+            txn->set_ts(max_ts);
             txn->lock_ready = true;
 #if PF_CS
             INC_STATS(txn->get_thd_id(), time_read_write,  (get_sys_clock() - startt_r_w));
@@ -97,27 +133,54 @@ RC Row_rr::access(txn_man * txn, TsType type, Access * access){
         }
     }
 
+    return Abort;
+}
+
+Version *create_new_version(txn_man * txn){
+    Version* new_version = nullptr;
+#if PF_CS
+    uint64_t starttime_creat = get_sys_clock();
+#endif
+    auto reserve_version = txn->h_thd->reserve_version();
+    if (reserve_version == nullptr){
+        new_version = (Version *) _mm_malloc(sizeof(Version), 64);
+        new_version->init();
+        new_version->next = nullptr;
+        new_version->data = (row_t *) _mm_malloc(sizeof(row_t), 64);
+        new_version->data->init(g_max_tuple_size);
+    } else{
+        new_version = reserve_version;
+        new_version->init();
+        new_version->next = nullptr;
+    }
+#if PF_CS
+    uint64_t endtime_creat = get_sys_clock();
+    INC_STATS(txn->get_thd_id(), time_creat_version, endtime_creat - starttime_creat);
+#endif
+
+    return new_version;
+}
+
+RC Row_rr::access(txn_man * txn, TsType type, Access * access){
+    // for long transaction, assign timestamp at first read:
+    //     first read init the ts, dynamic adjust by following read max{read.beginTs}
+    uint64_t startt_r_w = get_sys_clock();
+    if(txn->is_long ){
+        lock_row(txn);
+        COMPILER_BARRIER
+        Version * latest_committed = latest;
+        unlock_row(txn);
+        COMPILER_BARRIER
+
+        auto ret = read_committed(txn, latest_committed, startt_r_w, access);
+
+        return ret;
+    }
+
+    // for read-after-write, creat version, pre allocate memory space
     Version* new_version = nullptr;
     if (type == P_REQ) {
-#if PF_CS
-        uint64_t starttime_creat = get_sys_clock();
-#endif
-        auto reserve_version = txn->h_thd->reserve_version();
-        if (reserve_version == nullptr){
-            new_version = (Version *) _mm_malloc(sizeof(Version), 64);
-            new_version->init();
-            new_version->next = nullptr;
-            new_version->data = (row_t *) _mm_malloc(sizeof(row_t), 64);
-            new_version->data->init(g_max_tuple_size);
-        } else{
-            new_version = reserve_version;
-            new_version->init();
-            new_version->next = nullptr;
-        }
-#if PF_CS
-        uint64_t endtime_creat = get_sys_clock();
-        INC_STATS(txn->get_thd_id(), time_creat_version, endtime_creat - starttime_creat);
-#endif
+        new_version = create_new_version(txn);
     }
 
     RC rc = RCOK;
@@ -125,6 +188,7 @@ RC Row_rr::access(txn_man * txn, TsType type, Access * access){
     uint64_t startt_get_latch = get_sys_clock();
 #endif
     RRLockEntry * entry = get_entry(access);
+
     lock_row(txn);
     COMPILER_BARRIER
 #if PF_CS
@@ -148,6 +212,7 @@ RC Row_rr::access(txn_man * txn, TsType type, Access * access){
         return rc;
     }
 
+    // clear old versions
     auto ret = remove_tombstones();
     if (!ret){
         rc = Abort;
@@ -160,6 +225,7 @@ RC Row_rr::access(txn_man * txn, TsType type, Access * access){
         return rc;
     }
 
+    // start read, write
     ts_t ts = txn->get_ts();
     if (type == R_REQ) {
         txn_man *retire_txn = version_header->retire;

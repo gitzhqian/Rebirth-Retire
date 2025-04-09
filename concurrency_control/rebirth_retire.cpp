@@ -88,7 +88,7 @@ RC txn_man::validate_rr(RC rc) {
 
     uint32_t i_dependency_on_size = parents.size();
     uint32_t i_dependency_semaphore = i_dependency_on_size;
-    printf("size: %lu \n", i_dependency_on_size);
+//    printf("size: %lu \n", i_dependency_on_size);
 
     auto *i_depents = new std::unordered_set<uint64_t>();
     bool has_check = false;
@@ -160,8 +160,7 @@ RC txn_man::validate_rr(RC rc) {
     }
 
 
-#if READ_ONLY_OPTIMIZATION_ENABLE
-    if(this->is_long || this->read_only) {
+    if(this->is_long  ) {
         this->status = COMMITED;
 
         parents.clear();
@@ -173,7 +172,6 @@ RC txn_man::validate_rr(RC rc) {
 
         return rc;
     }
-#endif
 
 #if PF_CS
     uint64_t startt_latch = get_sys_clock();
@@ -221,6 +219,10 @@ RC txn_man::validate_rr(RC rc) {
         new_version->retire = nullptr;
         new_version->type = XP;
         accesses[rid]->orig_row->manager->latest = new_version;
+#if PREFETCH
+        auto prefh_latest_ = accesses[rid]->orig_row->manager->prefh_latest;
+        accesses[rid]->orig_row->manager->version_prefhs_[prefh_latest_++] = new_version;
+#endif
 
         auto en = accesses[rid]->lock_entry;
         auto type = accesses[rid]->type;

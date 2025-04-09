@@ -73,20 +73,29 @@ public:
     RC access(txn_man *txn, TsType type, Access *access);
     RC active_retire(RRLockEntry * entry);
     bool bring_next(txn_man * txn, txn_man * curr );
+    RC read_committed(txn_man * txn, Version* read_committed, uint64_t start_r_w, Access * access);
 
-    volatile bool blatch;
+//    volatile bool blatch;
     Version *version_header;              // version header of a row's version chain (N2O)
     Version *latest;
     std::list<RRLockEntry *> *entry_list;
     RRLockEntry * owner;
     UInt32 waiter_cnt;
-    UInt32 retired_cnt;
+//    UInt32 retired_cnt;
+
+#if PREFETCH
+    Version **version_prefhs_;
+    uint32_t prefh_len;
+    uint32_t prefh_latest;
+#endif
 
 #if LATCH == LH_SPINLOCK
     pthread_spinlock_t * spinlock_row;
 #else
     mcslock * latch_row;
 #endif
+
+
 
     void  lock_row(txn_man * txn) const {
         if (likely(g_thread_cnt > 1)) {

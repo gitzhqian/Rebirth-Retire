@@ -405,7 +405,6 @@ row_t * txn_man::get_row(row_t * row, access_t type) {
 
     if (rc == Abort) {
         accesses[row_cnt]->orig_row = NULL;
-//        printf("read abort; /n");
         return NULL;
     }
     auto temp_version = (Version*) accesses[row_cnt]->tuple_version;
