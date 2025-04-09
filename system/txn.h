@@ -8,9 +8,9 @@
 #include "manager.h"
 #include "row.h"
 #include <atomic>
-//#include <unordered_set>
-//#include "tbb/tbb.h"
 
+
+class index_base;
 class workload;
 class thread_t;
 class row_t;
@@ -56,7 +56,7 @@ public:
 #elif CC_ALG == TICTOC
     ts_t 		wts;
     ts_t 		rts;
-#elif CC_ALG == SILO
+#elif CC_ALG == SILO || CC_ALG == MOCC
     ts_t 		tid;
     ts_t 		epoch;
 #elif CC_ALG == HEKATON
@@ -85,6 +85,14 @@ struct TxnEntry {
 };
 #endif
 
+#if CC_ALG == MOCC
+struct RLL {
+    int lt;
+    row_t *row;
+    bool state;
+};
+#endif
+
 class txn_man
 {
 public:
@@ -104,17 +112,18 @@ public:
     txnid_t 		    txn_id;
     uint64_t            abort_cnt;          // Actually this attribute is useless because no one accesses it.
 
-
+    bool readonly = false;
+    bool read_committed = false;
 
     // update per request
     row_t * volatile    cur_row;
     // not used while having no inserts
-    uint64_t 		    insert_cnt;
-#if INSERT_ENABLED
-    row_t * 		    insert_rows[MAX_ROW_PER_TXN];
-#else
-    row_t *             insert_rows[1];
-#endif
+//    uint64_t 		    insert_cnt;
+//#if INSERT_ENABLED
+//    row_t * 		    insert_rows[MAX_ROW_PER_TXN];
+//#else
+//    row_t *             insert_rows[1];
+//#endif
     // ideal: one cache line
 
     // **************************************
@@ -185,8 +194,13 @@ public:
     bool                read_only;
 #endif
 
-    std::unordered_multimap<txn_man*, DepType> parents;
+    std::vector<std::pair<txn_man*, DepType>> parents;
+#if CHILDOPT
+    std::atomic<uint64_t> children{0};  // 初始化为 0，所有线程位都是 0
+#else
     tbb::concurrent_vector<std::pair<txn_man *, DepType>> children;
+#endif
+
     volatile bool       status_latch;
 
 #elif CC_ALG == TICTOC
@@ -197,7 +211,7 @@ public:
     bool 			    _pre_abort;
     bool 			    _validation_no_wait;
     // [SILO]
-#elif CC_ALG == SILO
+#elif CC_ALG == SILO || CC_ALG == MOCC
     ts_t 			    last_tid;
     ts_t 			    _cur_tid;
     bool 			    _pre_abort;
@@ -325,9 +339,8 @@ public:
 #endif
     // [VLL]
     row_t * 		    get_row(row_t * row, access_t type);
-    itemid_t *	        index_read(INDEX * index, idx_key_t key, int part_id);
-    void 			    index_read(INDEX * index, idx_key_t key, int part_id,
-                                   itemid_t *& item);
+//    itemid_t *	        index_read(INDEX * index, idx_key_t key, int part_id);
+//    void 			    index_read(INDEX * index, idx_key_t key, int part_id, itemid_t *& item);
     // [IC3]
     void                begin_piece(int piece_id);
     RC                  end_piece(int piece_id);
@@ -346,7 +359,10 @@ public:
     RC 				    validate_hekaton(RC rc);
     // [SILO]
 #elif CC_ALG == SILO
-    RC				    validate_silo();
+    RC			   validate_silo();
+#elif (CC_ALG == MOCC)
+	int 			step = 0;
+	RC 				validate_mocc();
 #elif CC_ALG == REBIRTH_RETIRE
     RC                  validate_rr(RC rc);
     void                abort_process(txn_man * txn );
@@ -364,22 +380,68 @@ public:
 #if NEXT_TS
         uint64_t new_timestamp = timestamp +1;
 #else
-        uint64_t low16 = timestamp & ((1ULL << 16) - 1);  // 低 16 位
-        uint64_t high48 = (timestamp >> 16) & ((1ULL << 48) - 1);  // 高 48 位
-        high48 += 1;
-        uint64_t new_timestamp = (high48 << 16) | low16;
+        uint64_t thd_id = timestamp & 0xFF;      // 提取低 8 位的 thd_id
+        uint64_t time = timestamp >> 8;          // 提取高 56 位的 time
+        time += 1;
+        uint64_t new_timestamp = (time << 8) | thd_id;
 #endif
         return new_timestamp;
     }
 #endif
 
+    RC              validate();
+
+    itemid_t *		index_read(index_base * index, idx_key_t key, int part_id);
+    void 			index_read(index_base * index, idx_key_t key, int part_id, itemid_t *& item);
+    RC				index_read_multiple(index_base* index, idx_key_t key, itemid_t** items, size_t& count, int part_id);
+    RC				index_read_range(index_base* index, idx_key_t min_key, idx_key_t max_key, itemid_t** items, size_t& count, int part_id);
+    RC				index_read_range_rev(index_base* index, idx_key_t min_key, idx_key_t max_key, itemid_t** items, size_t& count, int part_id);
+    RC              apply_index_changes(RC rc);
+    bool            insert_idx(index_base* index, uint64_t key, row_t* row, int part_id);
+    bool            remove_idx(index_base* index, uint64_t key, row_t* row, int part_id);
+    row_t*          search(index_base* index, size_t key, int part_id, access_t type);
+
+#if CC_ALG == MOCC
+    bool is_locked(uint64_t key);
+    void remove_non_cononical_lock(uint64_t key);
+    void insert_cononical_lock(int lt, row_t *row);
+    void remove_cononical_lock(uint64_t key);
+    void unlock_read_locks_all();
+    void clear_lock_state(RC rc);
+    bool track_perf_sig = false;
+    int	lock_rd_cnt = 0;
+#endif
+
 protected:
     void 			    insert_row(row_t * row, table_t * table);
-    void                index_insert(row_t * row, INDEX * index, idx_key_t key);
+//    void                index_insert(row_t * row, INDEX * index, idx_key_t key);
+    bool 			    remove_row(row_t* row);
 
 private:
 #if CC_ALG == BAMBOO || CC_ALG == WOUND_WAIT || CC_ALG == WAIT_DIE || CC_ALG == NO_WAIT || CC_ALG == DL_DETECT ||  CC_ALG == REBIRTH_RETIRE
     void                assign_lock_entry(Access * access);
+#endif
+    // insert rows
+    uint64_t 		insert_cnt;
+    row_t * 		insert_rows[MAX_ROW_PER_TXN];
+    uint64_t 		remove_cnt;
+    row_t * 		remove_rows[MAX_ROW_PER_TXN];
+
+    // insert/remove indexes
+    uint64_t 		   insert_idx_cnt;
+    index_base*   insert_idx_idx[MAX_ROW_PER_TXN];
+    idx_key_t	     insert_idx_key[MAX_ROW_PER_TXN];
+    row_t* 		     insert_idx_row[MAX_ROW_PER_TXN];
+    int	       	   insert_idx_part_id[MAX_ROW_PER_TXN];
+
+    uint64_t 		   remove_idx_cnt;
+    index_base*   remove_idx_idx[MAX_ROW_PER_TXN];
+    idx_key_t	     remove_idx_key[MAX_ROW_PER_TXN];
+    int	      	   remove_idx_part_id[MAX_ROW_PER_TXN];
+
+#if CC_ALG == MOCC
+    RLL cur_lock_list[MAX_ROW_PER_TXN];
+	int cur_lock_list_head = 0;
 #endif
 
 };
@@ -389,6 +451,9 @@ inline status_t txn_man::wound_txn(txn_man * txn)
 {
 #if CC_ALG == BAMBOO || CC_ALG == WOUND_WAIT || CC_ALG == REBIRTH_RETIRE
     auto ret = txn->set_abort();
+//#if PF_CS
+//    INC_STATS(this->get_thd_id(), find_circle_abort_depent, 1);
+//#endif
     return ret;
 #else
     return ABORTED;

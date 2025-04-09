@@ -27,6 +27,9 @@ RC
 Row_tictoc::access(txn_man * txn, TsType type, row_t * local_row)
 {
 #if ATOMIC_WORD
+#if PF_CS
+    uint64_t startt = get_sys_clock();
+#endif
 	uint64_t v = 0;
 	uint64_t v2 = 1;
 	uint64_t lock_mask = LOCK_BIT;
@@ -51,6 +54,10 @@ Row_tictoc::access(txn_man * txn, TsType type, row_t * local_row)
 	}
 	txn->last_wts = v & WTS_MASK;
 	txn->last_rts = ((v & RTS_MASK) >> WTS_LEN) + txn->last_wts;
+
+#if PF_CS
+    INC_TMP_STATS(txn->get_thd_id(), time_copy, get_sys_clock() - startt);
+#endif
 #else
 	lock();
 	txn->last_wts = _wts;

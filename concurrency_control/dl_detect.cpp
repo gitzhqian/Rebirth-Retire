@@ -14,6 +14,9 @@
 /********************************************************/
 void DL_detect::init() {
 	dependency = new DepThd[g_thread_cnt];
+    for (int i = 0; i < g_thread_cnt; i++) {
+        pthread_mutex_init(&dependency[i].lock, nullptr);
+    }
 	V = g_thread_cnt;
 }
 

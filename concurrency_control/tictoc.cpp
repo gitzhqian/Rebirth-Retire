@@ -8,6 +8,11 @@
 RC
 txn_man::validate_tictoc()
 {
+#if PF_CS
+    uint64_t starttime = get_sys_clock();
+    uint64_t wait_span = 0;
+#endif
+
 	RC rc = RCOK;
 	int write_set[wr_cnt];
 	int read_set[row_cnt - wr_cnt];
@@ -84,6 +89,10 @@ txn_man::validate_tictoc()
 			bool lock;
 			uint64_t wts, rts;
 			row->manager->get_ts_word(lock, rts, wts);
+			if (row->is_deleted){
+                rc = Abort;
+                goto final;
+			}
 		#if TICTOC_MV 
 			if (commit_wts > wts && (wts != accesses[ read_set[i] ]->wts))
 		#else 
@@ -115,6 +124,7 @@ txn_man::validate_tictoc()
 			if (num_locks == wr_cnt)
 				done = true;
 			else {
+                uint64_t wait_time = get_sys_clock();
 				for (int i = 0; i < num_locks; i++)
 					accesses[ write_set[i] ]->orig_row->manager->release();
 				if (_pre_abort) {
@@ -145,7 +155,12 @@ txn_man::validate_tictoc()
 					}
 			#endif
 				}
-				PAUSE 
+				PAUSE
+
+#if PF_CS
+                uint64_t timespan = get_sys_clock() - wait_time;
+                wait_span = wait_span + timespan;
+#endif
 			}
 		}
 	} 
@@ -218,6 +233,9 @@ txn_man::validate_tictoc()
 */
 #endif
 final:
+
+    rc = apply_index_changes(rc);
+
 	if (rc == Abort) {
 #if WR_VALIDATION_SEPARATE 
 		for (int i = 0; i < num_locks; i++) 
@@ -226,7 +244,7 @@ final:
 		for (int i = 0; i < num_locks; i++) 
 			accesses[ sorted_set[i] ]->orig_row->manager->release();
 #endif
-		cleanup(rc);
+//		cleanup(rc);
 	} else {
 		if (commit_wts > _max_wts)
 			_max_wts = commit_wts;
@@ -234,31 +252,46 @@ final:
 		if (_write_copy_ptr) {
 			assert(false);
 		} else {
-#if WR_VALIDATION_SEPARATE 
+#if WR_VALIDATION_SEPARATE
+//            for (UInt32 i = 0; i < insert_cnt; i++) {
+//                row_t * row = insert_rows[i];
+//                row->manager->release();  // unlocking is done as well
+//            }
+
 			for (int i = 0; i < wr_cnt; i++) {
 				Access * access = accesses[ write_set[i] ];
-				access->orig_row->manager->write_data( 
-					access->data, commit_wts);
+				access->orig_row->manager->write_data(access->data, commit_wts);
 				access->orig_row->manager->release();
 			}
 #else 
-//			for (int i = 0; i < row_cnt; i++) {
-//				Access * access = accesses[ i ];
-//				if (access->type == WR)
-//					access->orig_row->manager->write_data(access->data, max_wts);
-//				access->orig_row->manager->release();
-//			}
+			for (int i = 0; i < row_cnt; i++) {
+				Access * access = accesses[ i ];
+				if (access->type == WR)
+					access->orig_row->manager->write_data(access->data, max_wts);
+				access->orig_row->manager->release();
+			}
 #endif
 		}
 		if (g_prt_lat_distr)
 			stats.add_debug(get_thd_id(), commit_wts, 2);
-		cleanup(rc);
+//		cleanup(rc);
 		if (_atomic_timestamp && rc == RCOK) {
 			ts_t ts = glob_manager->get_ts(get_thd_id());
 			if (g_prt_lat_distr)
 				stats.add_debug(get_thd_id(), ts, 1);
 		}
 	}
+
+#if PF_CS
+    uint64_t endtime = get_sys_clock();
+    uint64_t timespan = endtime - starttime;
+    uint64_t latchtime = timespan - wait_span;
+    INC_STATS(this->get_thd_id(), time_get_latch, latchtime);
+    INC_STATS(this->get_thd_id(), time_commit , wait_span);
+    this->wait_latch_time = this->wait_latch_time + timespan;
+#endif
+
+    cleanup(rc);
 	return rc;
 }
 

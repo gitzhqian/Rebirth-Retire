@@ -16,18 +16,16 @@ void Row_rr::init(row_t *row){
 
     version_header->begin_ts = 0;
     version_header->end_ts = INF;
-
-//    version_header->dynamic_txn_ts = (volatile ts_t *)_mm_malloc(sizeof(ts_t), 64);
-//    version_header->dynamic_txn_ts = new ts_t(0);
     version_header->type = XP;
     version_header->read_queue = NULL;
+
+    version_header->data = row;
 
     // pointer must be initialized
     version_header->prev = NULL;
     version_header->next = NULL;
     version_header->retire = NULL;
 
-//    blatch = false;
 #if LATCH == LH_SPINLOCK
     spinlock_row = new pthread_spinlock_t;
     pthread_spin_init(spinlock_row, PTHREAD_PROCESS_SHARED);
@@ -35,34 +33,69 @@ void Row_rr::init(row_t *row){
     latch_row = new mcslock();
 #endif
 
+    latest = version_header;
     owner = nullptr;
     entry_list = new std::list<RRLockEntry *>();
 }
 
 
 RC Row_rr::access(txn_man * txn, TsType type, Access * access){
-
     // Optimization for read_only long transaction.
-#if READ_ONLY_OPTIMIZATION_ENABLE
-    if(txn->is_long && txn->read_only){
-        while(!ATOM_CAS(blatch, false, true)){
-            PAUSE
-        }
-
-        Version* read_only_version = version_header;
-        while (read_only_version){
-            if(read_only_version->begin_ts != UINT64_MAX){
-                assert(read_only_version->retire == NULL);
-                access->tuple_version = read_only_version;
-                break;
-            }
-            read_only_version = read_only_version->next;
-        }
-
-        blatch = false;
-        return RCOK;
-    }
+    uint64_t startt_r_w = get_sys_clock();
+    if(txn->is_long || txn->read_only){
+        ts_t ts = txn->get_ts();
+        ts = assign_ts(ts, txn);
+        if (ts >= latest->begin_ts){
+            if (latest->end_ts == INF || ts < latest->end_ts){
+                if(latest->type == XP){
+                    access->tuple_version = latest;
+                    txn->lock_ready = true;
+//                    auto max_ts = std::max(latest->begin_ts, ts);
+//                    txn->set_ts(max_ts);
+#if PF_CS
+                    INC_STATS(txn->get_thd_id(), time_read_write,  (get_sys_clock() - startt_r_w));
+                    txn->wait_latch_time = txn->wait_latch_time + (get_sys_clock() - startt_r_w);
 #endif
+                    return RCOK;
+                }
+            }
+        }else{
+            // prefetching
+            Version* read_only_version = latest;
+            while (true){
+                if (read_only_version == nullptr){
+                    txn->lock_abort = true;
+                    return Abort;
+                }
+                if(read_only_version->type == XP){
+#if PREFETCH
+                    assert(read_only_version->retire == NULL);
+                    access->tuple_version = read_only_version;
+                    break;
+#else
+                    if (ts >= read_only_version->begin_ts){
+                        assert(read_only_version->retire == NULL);
+                        access->tuple_version = read_only_version;
+                        break;
+                    }
+#endif
+                }
+
+                read_only_version = read_only_version->next;
+            }
+
+            assert(access->tuple_version != nullptr);
+            assert(access->tuple_version->data != nullptr);
+//            auto max_ts = std::max(access->tuple_version->begin_ts, ts);
+//            txn->set_ts(max_ts);
+            txn->lock_ready = true;
+#if PF_CS
+            INC_STATS(txn->get_thd_id(), time_read_write,  (get_sys_clock() - startt_r_w));
+            txn->wait_latch_time = txn->wait_latch_time + (get_sys_clock() - startt_r_w);
+#endif
+            return RCOK;
+        }
+    }
 
     Version* new_version = nullptr;
     if (type == P_REQ) {
@@ -88,13 +121,10 @@ RC Row_rr::access(txn_man * txn, TsType type, Access * access){
     }
 
     RC rc = RCOK;
-    if (txn->status == ABORTED){
-        rc = Abort;
-        return rc;
-    }
-
-    RRLockEntry * entry = get_entry(access);
+#if PF_CS
     uint64_t startt_get_latch = get_sys_clock();
+#endif
+    RRLockEntry * entry = get_entry(access);
     lock_row(txn);
     COMPILER_BARRIER
 #if PF_CS
@@ -104,6 +134,7 @@ RC Row_rr::access(txn_man * txn, TsType type, Access * access){
     txn->wait_latch_time = txn->wait_latch_time + timespan1;
     startt_get_latch = end_get_latch;
 #endif
+
     if (txn->status == ABORTED){
         rc = Abort;
         txn->lock_abort = true;
@@ -117,31 +148,61 @@ RC Row_rr::access(txn_man * txn, TsType type, Access * access){
         return rc;
     }
 
-    remove_tombstones();
+    auto ret = remove_tombstones();
+    if (!ret){
+        rc = Abort;
+#if PF_CS
+        uint64_t timespan2 = get_sys_clock() - startt_get_latch;
+        INC_STATS(txn->get_thd_id(), time_get_cs, timespan2);
+        txn->wait_latch_time = txn->wait_latch_time + timespan2;
+#endif
+        unlock_row(txn);
+        return rc;
+    }
 
     ts_t ts = txn->get_ts();
     if (type == R_REQ) {
         txn_man *retire_txn = version_header->retire;
         Version *read_version = version_header;
-        if (owner == nullptr ){
-            if (read_version->type != AT){
-                access->tuple_version = read_version;
-                goto final;
-            } else {
-                // read a version whose txn's timestamp < curr txn's timestamp
-                if (ts == 0){
-                    assign_ts(retire_txn->get_ts(), retire_txn);
-                    ts = assign_ts(ts, txn);
+            if (owner){
+                auto own_txn = owner->txn;
+                auto own_ts = own_txn->get_ts();
+                own_ts = assign_ts(own_ts, own_txn);
+                ts = assign_ts(ts, txn);
+                if (a_higher_than_b(own_ts, ts)){
+                    rc = WAIT;
+                } else {
+                    read_version = owner->access->tuple_version;
                 }
-                while (true){
-                    if (read_version->retire == nullptr && read_version->type == XP){
-                        break;
-                    } else {
-                        if (read_version->retire != nullptr && read_version->retire->get_ts() < ts){
+            }
+
+            if (rc != WAIT){
+                if (!owner){
+                    while (true){
+                        if (read_version == nullptr){
+                            rc = Abort;
+                            goto final;
+                        }
+                        if (read_version == latest){
                             break;
                         }
+                        if (read_version->type == XP){
+                            ts = assign_ts(ts, txn);
+                            if (read_version->begin_ts < ts){
+                                break;
+                            }
+                        }else if (read_version->type == WR){
+                            retire_txn = read_version->retire;
+                            assign_ts(retire_txn->get_ts(), retire_txn);
+                            ts = assign_ts(ts, txn);
+                            if (retire_txn != nullptr && retire_txn->get_ts() < ts ){
+                                break;
+                            }
+                        } else{
+                        }
+
+                        read_version = read_version->next;
                     }
-                    read_version = read_version->next;
                 }
 
                 auto hreader = new HReader(txn);
@@ -154,7 +215,9 @@ RC Row_rr::access(txn_man * txn, TsType type, Access * access){
                     hreader->next = read_version->read_queue;
                     read_version->read_queue = hreader;
                 }
+
                 retire_txn = read_version->retire;
+                auto thd_id = txn->get_thd_id();
                 if(retire_txn == txn){
                     rc = Abort;
                     goto final;
@@ -164,59 +227,35 @@ RC Row_rr::access(txn_man * txn, TsType type, Access * access){
                     goto final;
                 } else {
                     // if read a header, and the header is uncommitted
-                    if (read_version == version_header){
+                    if (read_version == version_header || (owner != nullptr && read_version == owner->access->tuple_version)){
+#if CHILDOPT
+                        retire_txn->children.fetch_or(1ULL << thd_id, std::memory_order_relaxed);
+#else
                         auto mk = std::make_pair(txn, DepType::WRITE_READ_);
                         retire_txn->children.push_back(mk);
+#endif
                         retire_txn->timestamp_v.fetch_add(1, std::memory_order_relaxed);
                         auto mk_p = std::make_pair(retire_txn, DepType::WRITE_READ_);
-                        txn->parents.insert(mk_p);
+                        txn->parents.push_back(mk_p);
                     } else {
                         // if read a header.pre, and the pre is uncommitted
                         if (read_version->prev != nullptr){
                             retire_txn = read_version->prev->retire;
                             if (retire_txn != nullptr){
+#if CHILDOPT
+                                retire_txn->children.fetch_or(1ULL << thd_id, std::memory_order_relaxed);
+#else
                                 auto mk = std::make_pair(txn,  DepType::WRITE_READ_);
                                 retire_txn->children.push_back(mk);
+#endif
                                 retire_txn->timestamp_v.fetch_add(1, std::memory_order_relaxed);
                                 auto mk_p = std::make_pair(retire_txn, DepType::WRITE_READ_);
-                                txn->parents.insert(mk_p);
+                                txn->parents.push_back(mk_p);
                             }
                         }
                     }
                 }
             }
-        } else {
-            auto own_txn = owner->txn;
-            if (own_txn != nullptr ){
-                if (own_txn->status == ABORTED ) {
-                    if (read_version->type != AT){
-                        access->tuple_version = read_version;
-                        goto final;
-                    }
-                } else if (own_txn->status == validating || own_txn->status == COMMITED) {
-                    read_version = owner->access->tuple_version;
-                    access->tuple_version = read_version;
-                    goto final;
-                } else if(own_txn->status == RUNNING){
-                    auto own_ts = own_txn->get_ts();
-                    own_ts = assign_ts(own_ts, own_txn);
-                    ts = assign_ts(ts, txn);
-                    if (a_higher_than_b(own_ts, ts)){
-                        rc = WAIT;
-                    }
-                }
-            }
-        }
-
-        if (!owner){
-            if (!entry_list->empty()){
-                auto read_en = find_write_in_waiter(ts);
-                if (read_en != nullptr && read_en->txn!= nullptr){
-                    rc = WAIT;
-                }
-            }
-        }
-
         if (rc == WAIT){
             assert(ts > 0);
             entry->type = LOCK_SH;
@@ -228,9 +267,9 @@ RC Row_rr::access(txn_man * txn, TsType type, Access * access){
     }else if (type == P_REQ) {
         txn_man *retire_txn = version_header->retire;
         Version *write_version = version_header;
-        if (!owner ){
+        if (!owner ) {
             if ((retire_txn == nullptr && write_version->type == XP) ||
-                (retire_txn != nullptr && (retire_txn->status == COMMITED || retire_txn->status == validating))){
+                (retire_txn != nullptr && (retire_txn->status == COMMITED || retire_txn->status == validating))) {
                 access->old_version = version_header;
                 new_version->next = version_header;
                 new_version->retire = txn;
@@ -251,8 +290,8 @@ RC Row_rr::access(txn_man * txn, TsType type, Access * access){
         } else {
             auto own_txn = owner->txn;
             auto own_access = owner->access;
-            if (own_access != nullptr && own_txn != nullptr){
-                if (own_txn->status != ABORTED){
+            if (own_access != nullptr && own_txn != nullptr) {
+                if (own_txn->status != ABORTED) {
                     retire_txn = own_txn;
                     write_version = own_access->tuple_version;
                 }
@@ -260,10 +299,19 @@ RC Row_rr::access(txn_man * txn, TsType type, Access * access){
         }
 
         if(retire_txn == txn){
-            rc = Abort;
-            goto final;
+            if (owner!= nullptr && txn == owner->txn){
+                new_version->retire = txn;
+                new_version->type = WR;
+                access->tuple_version = new_version;
+                goto final;
+            }else{
+                rc = Abort;
+                goto final;
+            }
         }
+
         // assign timestamp
+        ts = txn->get_ts();
         if (ts == 0) {
             if (retire_txn != nullptr){
                 auto retire_txn_ts = retire_txn->get_ts();
@@ -286,6 +334,7 @@ RC Row_rr::access(txn_man * txn, TsType type, Access * access){
                     }
                 }
             }
+
             ts = assign_ts(ts, txn);
         }
 
@@ -327,18 +376,17 @@ RC Row_rr::access(txn_man * txn, TsType type, Access * access){
         }
     }
 
+#if PF_CS
+    INC_STATS(txn->get_thd_id(), time_get_cs, (get_sys_clock() - startt_get_latch));
+    txn->wait_latch_time = txn->wait_latch_time + (get_sys_clock() - startt_get_latch);
+#endif
+
     //bring next waiter
-    if (bring_next(txn, txn)) {
+    if (bring_next(txn, txn )) {
         rc = RCOK;
     }
 
-    final:
-#if PF_CS
-    uint64_t timespan2 = get_sys_clock() - startt_get_latch;
-    INC_STATS(txn->get_thd_id(), time_get_cs, timespan2);
-    txn->wait_latch_time = txn->wait_latch_time + timespan2;
-#endif
-
+final:
     unlock_row(txn);
     COMPILER_BARRIER
 
@@ -352,16 +400,18 @@ RC Row_rr::access(txn_man * txn, TsType type, Access * access){
 
 bool Row_rr::bring_next(txn_man *txn, txn_man *curr) {
     bool has_txn = false;
-
+#if PF_CS
+    uint64_t timestart_passive = get_sys_clock();
+#endif
     // remove the aborted txn, GC
-    remove_tombstones();
+    auto ret = remove_tombstones();
+    if (!ret){
+        return false;
+    }
 
 #if PASSIVE_RETIRE
     // passive retire the owner
     if (owner != nullptr){
-    #if PF_CS
-        uint64_t timestart_passive = get_sys_clock();
-    #endif
         while (!owner){
             if (owner->has_write){
                 break;
@@ -400,6 +450,7 @@ bool Row_rr::bring_next(txn_man *txn, txn_man *curr) {
     }
 #endif
 
+    uint64_t retire_cs_ = get_sys_clock();
     // if any waiter can join the owners, just do it!
     for (auto it = entry_list->begin(); it != entry_list->end(); ++it) {
         auto entry = *it;
@@ -432,8 +483,13 @@ bool Row_rr::bring_next(txn_man *txn, txn_man *curr) {
                             auto dep_read_txn_ = dep_read_->cur_reader;
                             if (dep_read_txn_ != nullptr && dep_read_txn_->status == RUNNING) {
                                 if (dep_read_txn_->get_thd_id() != owner->txn->get_thd_id()) {
+#if CHILDOPT
+                                    auto thd_id = owner->txn->get_thd_id();
+                                    dep_read_txn_->children.fetch_or(1ULL << thd_id, std::memory_order_relaxed);
+#else
                                     auto mk = std::make_pair(owner->txn, DepType::READ_WRITE_);
                                     dep_read_txn_->children.push_back(mk);
+#endif
                                     dep_read_txn_->timestamp_v.fetch_add(1, std::memory_order_relaxed);
                                     auto retire_ts = dep_read_txn_->get_ts();
                                     if (dep_read_txn_->status == validating && owner->txn->get_ts() < retire_ts) {
@@ -441,7 +497,7 @@ bool Row_rr::bring_next(txn_man *txn, txn_man *curr) {
                                     }
                                     auto mk_p = std::make_pair(dep_read_txn_, DepType::READ_WRITE_);
                                     if (owner->txn != nullptr) {
-                                        owner->txn->parents.insert(mk_p);
+                                        owner->txn->parents.push_back(mk_p);
                                         has_depend = true;
                                     }
                                 }
@@ -451,8 +507,13 @@ bool Row_rr::bring_next(txn_man *txn, txn_man *curr) {
                         }
                     }
                     if (!has_depend) {
+#if CHILDOPT
+                        auto thd_id = owner->txn->get_thd_id();
+                        retire_tail->children.fetch_or(1ULL << thd_id, std::memory_order_relaxed);
+#else
                         auto mk = std::make_pair(owner->txn, DepType::WRITE_WRITE_);
                         retire_tail->children.push_back(mk);
+#endif
                         retire_tail->timestamp_v.fetch_add(1, std::memory_order_relaxed);
                         auto retire_ts = retire_tail->get_ts();
                         if (retire_tail->status == validating && owner->txn->get_ts() < retire_ts) {
@@ -460,9 +521,9 @@ bool Row_rr::bring_next(txn_man *txn, txn_man *curr) {
                         }
                         auto mk_p = std::make_pair(retire_tail, DepType::WRITE_WRITE_);
                         if (owner->txn != nullptr && owner->access != nullptr) {
-                            auto owner_parents = owner->txn->parents;
+                            auto& owner_parents = owner->txn->parents;
                             if (retire_tail != nullptr && retire_tail->status != ABORTED) {
-                                owner_parents.insert(mk_p);
+                                owner_parents.push_back(mk_p);
                             }
                         }
                     }
@@ -477,6 +538,7 @@ bool Row_rr::bring_next(txn_man *txn, txn_man *curr) {
                 }
 
                 has_txn = bring_out_waiter(entry, txn);
+                entry->txn->lock_ready = true;
                 if (entry->status != LOCK_OWNER) {
                     owner = nullptr;
                 }
@@ -511,14 +573,22 @@ bool Row_rr::bring_next(txn_man *txn, txn_man *curr) {
                             hreader->next = read_version->read_queue;
                             read_version->read_queue = hreader;
                         }
+#if CHILDOPT
+                        auto thd_id = en_txn->get_thd_id();
+                        retire_txn->children.fetch_or(1ULL << thd_id, std::memory_order_relaxed);
+#else
                         auto mk = std::make_pair(en_txn,  DepType::WRITE_READ_);
                         retire_txn->children.push_back(mk);
+#endif
                         retire_txn->timestamp_v.fetch_add(1, std::memory_order_relaxed);
                         auto mk_p = std::make_pair(retire_txn, DepType::WRITE_READ_);
-                        en_txn->parents.insert(mk_p);
+                        en_txn->parents.push_back(mk_p);
                     }
 
+                    en_txn->lock_ready = true;
+
                     entry->access->tuple_version = read_version;
+                    assert(read_version != nullptr);
                 }
             }
         } else {
@@ -526,6 +596,10 @@ bool Row_rr::bring_next(txn_man *txn, txn_man *curr) {
         }
     }
 
+#if PF_CS
+    INC_STATS(curr->get_thd_id(), time_retire_cs, (get_sys_clock() - retire_cs_));
+    curr->wait_latch_time = curr->wait_latch_time + (get_sys_clock() - retire_cs_);
+#endif
 
     return has_txn;
 }
@@ -575,7 +649,10 @@ RC Row_rr::active_retire(RRLockEntry * entry ) {
     }
 
     if (!owner){
-        bring_next(nullptr, nullptr);
+        auto ret = bring_next(nullptr, entry->txn);
+        if (ret){
+            rc = Abort;
+        }
     }
 
 #if PF_CS

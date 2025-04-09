@@ -24,6 +24,15 @@ public:
         assert(_tid_word & LOCK_BIT);
     }
 
+//    void set_tid(uint64_t tid) {
+//        assert(_tid_word & LOCK_BIT);
+//#if ATOMIC_WORD
+//        _tid_word = tid;
+//#else
+//        _tid = tid;
+//#endif
+//    }
+
 private:
 #if ATOMIC_WORD
     volatile uint64_t	_tid_word;

@@ -293,6 +293,10 @@ Row_ww::bring_next() {
     // If any waiter can join the owners, just do it!
     while (waiters_head && (owner_cnt == 0 || !conflict_lock(owners->type, waiters_head->type) )) {
         LIST_GET_HEAD(waiters_head, waiters_tail, entry);
+        if (entry->txn->lock_ready != 0){
+            waiter_cnt --;
+            continue;
+        }
         STACK_PUSH(owners, entry);
         entry->status = LOCK_OWNER;
         owner_cnt ++;

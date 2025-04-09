@@ -21,6 +21,7 @@ public:
     RC get_txn_man(txn_man *& txn_manager, thread_t * h_thd);
     table_t * 		t_warehouse;
     table_t * 		t_district;
+    table_t * 		t_district_ext;
     table_t * 		t_customer;
     table_t *		t_history;
     table_t *		t_neworder;
@@ -29,16 +30,17 @@ public:
     table_t *		t_item;
     table_t *		t_stock;
 
-    INDEX * 	i_item;
-    INDEX * 	i_warehouse;
-    INDEX * 	i_district;
-    INDEX * 	i_customer_id;
-    INDEX * 	i_customer_last;
-    INDEX * 	i_stock;
-    INDEX * 	i_order; // key = (w_id, d_id, o_id)
-    INDEX * 	i_orderline; // key = (w_id, d_id, o_id, ol_number)
-    INDEX * 	i_neworder;  // key = (w_id, d_id, o_id)
-    INDEX * 	i_orderline_wd; // key = (w_id, d_id).
+    index_base * 	i_item;
+    index_base * 	i_warehouse;
+    index_base * 	i_district;
+    index_base *  i_district_ext;
+    index_base * 	i_customer_id;
+    index_base * 	i_customer_last;
+    index_base * 	i_stock;
+    index_base * 	i_order; // key = (w_id, d_id, o_id)
+    index_base *	i_order_cust;
+    index_base * 	i_neworder; // key = (w_id, d_id, o_id)
+    index_base * 	i_orderline; // key = (w_id, d_id).
 
     bool ** delivering;
     uint32_t next_tid;
@@ -93,6 +95,30 @@ private:
     RC run_delivery(tpcc_query * query);
     RC run_stock_level(tpcc_query * query);
     RC run_query2(tpcc_query * query );
+
+    row_t* order_status_getCustomerByCustomerId(uint64_t w_id, uint64_t d_id,
+                                                uint64_t c_id);
+    row_t* order_status_getCustomerByLastName(uint64_t w_id, uint64_t d_id,
+                                                 char* c_last,
+                                              uint64_t* out_c_id);
+    row_t* order_status_getLastOrder(uint64_t w_id, uint64_t d_id, uint64_t c_id);
+    bool order_status_getOrderLines(uint64_t w_id, uint64_t d_id, int64_t o_id);
+
+    row_t* stock_level_getOId(uint64_t d_w_id, uint64_t d_id);
+    bool stock_level_getStockCount(uint64_t ol_w_id, uint64_t ol_d_id,
+                                   int64_t ol_o_id, uint64_t s_w_id,
+                                   uint64_t threshold,
+                                   uint64_t* out_distinct_count);
+    inline bool delivery_getNewOrder_deleteNewOrder(uint64_t d_id, uint64_t w_id,
+                                                    int64_t &out_o_id);
+    row_t* delivery_getCId(int64_t no_o_id, uint64_t d_id, uint64_t w_id);
+    void delivery_updateOrders(row_t* row, uint64_t o_carrier_id);
+    bool delivery_updateOrderLine_sumOLAmount(uint64_t o_entry_d, int64_t no_o_id,
+                                              uint64_t d_id, uint64_t w_id,
+                                              double* out_ol_total);
+    bool delivery_updateCustomer(double ol_total, uint64_t c_id, uint64_t d_id,
+                                 uint64_t w_id);
+
 
     bool has_local_row(row_t * location, access_t type, row_t * local, access_t local_type) {
         if (location == local) {

@@ -50,13 +50,12 @@ RC ycsb_txn_man::run_txn(base_query * query) {
         DEC_STATS(h_thd->get_thd_id(), run_time, get_sys_clock() - starttime);
     }
 
+    std::vector<row_t *> tmp_retire;
+    std::vector<RRLockEntry *> tmp_locks;
     for (uint32_t rid = 0; rid < m_query->request_cnt; rid ++) {
 #if CC_ALG == REBIRTH_RETIRE
         // REBIRTH_RETIRE: Abort txn actively(before executing next operation)
         if(this->status == ABORTED ){
-#if PF_CS
-            INC_STATS(this->get_thd_id(), find_circle_abort_depent, 1);
-#endif
             rc = Abort;
             goto final;
         }
@@ -140,8 +139,9 @@ RC ycsb_txn_man::run_txn(base_query * query) {
 //#endif
 
             iteration ++;
-            if (req->rtype == RD || req->rtype == WR || iteration == req->scan_len)
+            if (req->rtype == RD || req->rtype == WR || iteration == req->scan_len){
                 finish_req = true;
+            }
 #if (CC_ALG == REBIRTH_RETIRE)
             #if PASSIVE_RETIRE
             if (finish_req && (req->rtype == WR)) {
@@ -158,9 +158,18 @@ RC ycsb_txn_man::run_txn(base_query * query) {
                     rc = Abort;
                     goto final;
                 }else{
+#if WAIT_RR
+//                    tmp_retire.push_back(access_id);
+//                    retire_row(rid);
+                    row_t *rw = accesses[access_id]->orig_row;
+                    RRLockEntry *lr = accesses[access_id]->lock_entry;
+                    tmp_retire.push_back(rw);
+                    tmp_locks.push_back(lr);
+#else
                     if (retire_row(access_id) == Abort) {
                         return finish(Abort);
                     }
+#endif
                 }
             }
             #endif
@@ -179,6 +188,16 @@ RC ycsb_txn_man::run_txn(base_query * query) {
 
     rc = RCOK;
     final:
+
+//#if CC_ALG == REBIRTH_RETIRE && WAIT_RR
+//    for (int i = 0; i < tmp_retire.size(); ++i) {
+//        auto retire_row = tmp_retire[i];
+//        if (retire_row->retire_row(tmp_locks[i]) == Abort) {
+//            return finish(Abort);
+//        }
+//    }
+//
+//#endif
 
 #if CC_ALG == REBIRTH_RETIRE
     if (rc == RCOK){

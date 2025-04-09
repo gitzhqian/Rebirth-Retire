@@ -25,6 +25,8 @@ RC txn_man::retire_row(int access_cnt){
 }
 
 bool cycle_recheck(std::unordered_set<uint64_t> *i_depents, txn_man *txn){
+#if PF_CS
+    uint64_t starttime = get_sys_clock();
     auto *adjacencyList = new std::unordered_map<uint64_t, std::set<txn_man*> *>(); // to<-from
     auto ret = txn->buildGraph(adjacencyList, txn);
     bool cycle = false;
@@ -37,15 +39,20 @@ bool cycle_recheck(std::unordered_set<uint64_t> *i_depents, txn_man *txn){
         return true;
     }
 
+    uint64_t endtime = get_sys_clock();
+    uint64_t timespan1 = endtime - starttime;
+    INC_STATS(txn->get_thd_id(), time_verify, timespan1);  // time_verify: time to topologicalSort
+#endif
     return false;
 }
 
 RC txn_man::validate_rr(RC rc) {
     if(rc == Abort || status == ABORTED){
-
         abort_process(this);
         return Abort;
     }
+
+    this->status = validating;
 
     uint64_t serial_id = 0;
     serial_id =  this->get_ts() ;
@@ -77,10 +84,11 @@ RC txn_man::validate_rr(RC rc) {
         ts_zero = true;
     }
     assert(serial_id != INF);
-//    this->set_ts(serial_id);
+    this->set_ts(serial_id);
 
     uint32_t i_dependency_on_size = parents.size();
     uint32_t i_dependency_semaphore = i_dependency_on_size;
+    printf("size: %lu \n", i_dependency_on_size);
 
     auto *i_depents = new std::unordered_set<uint64_t>();
     bool has_check = false;
@@ -151,6 +159,22 @@ RC txn_man::validate_rr(RC rc) {
         return Abort;
     }
 
+
+#if READ_ONLY_OPTIMIZATION_ENABLE
+    if(this->is_long || this->read_only) {
+        this->status = COMMITED;
+
+        parents.clear();
+#if CHILDOPT
+        children.store(0, std::memory_order_relaxed);
+#else
+        children.clear();
+#endif
+
+        return rc;
+    }
+#endif
+
 #if PF_CS
     uint64_t startt_latch = get_sys_clock();
 #endif
@@ -162,7 +186,15 @@ RC txn_man::validate_rr(RC rc) {
 
         accesses[rid]->orig_row->manager->lock_row(this);
         auto new_version = accesses[rid]->tuple_version;
-        assert(new_version->begin_ts == UINT64_MAX && new_version->retire == this);
+//        assert(new_version->begin_ts == UINT64_MAX && new_version->retire == this);
+        if (new_version->begin_ts != UINT64_MAX || new_version->retire != this){
+            rc = Abort;
+            accesses[rid]->orig_row->manager->release_row(accesses[rid]->type, accesses[rid]->lock_entry, nullptr, rc, this);
+            accesses[rid]->orig_row->manager->unlock_row(this);
+            this->status = ABORTED;
+            abort_process(this);
+            return rc;
+        }
         auto old_version = accesses[rid]->old_version;
         if (old_version->type == AT){
             while (true){
@@ -188,6 +220,7 @@ RC txn_man::validate_rr(RC rc) {
         new_version->begin_ts = serial_id;
         new_version->retire = nullptr;
         new_version->type = XP;
+        accesses[rid]->orig_row->manager->latest = new_version;
 
         auto en = accesses[rid]->lock_entry;
         auto type = accesses[rid]->type;
@@ -205,7 +238,11 @@ RC txn_man::validate_rr(RC rc) {
     ATOM_CAS(status, validating, COMMITED);
 
     parents.clear();
+#if CHILDOPT
+    children.store(0, std::memory_order_relaxed);
+#else
     children.clear();
+#endif
 
     return rc;
 }
@@ -214,14 +251,17 @@ void txn_man::abort_process(txn_man * txn ){
     auto status_ = txn->status;
     ATOM_CAS(status, status_, ABORTED);
     txn->lock_abort = true;
-    COMPILER_BARRIER
+
+#if PF_CS
+    uint64_t release_cs = get_sys_clock();
+#endif
 
     for(int rid = 0; rid < row_cnt; rid++) {
-//        if (accesses[rid]->type == RD) {
-//            continue;
-//        }
+        if (accesses[rid]->orig_row->is_deleted) continue;
+        if (accesses[rid]->type == RD){
+            continue;
+        }
 
-//        assert(accesses[rid]->type == WR);
         accesses[rid]->orig_row->manager->lock_row(txn);
         auto en = accesses[rid]->lock_entry;
         auto version = accesses[rid]->tuple_version;
@@ -230,35 +270,81 @@ void txn_man::abort_process(txn_man * txn ){
         accesses[rid]->orig_row->manager->unlock_row(txn);
     }
 
-    for(auto & dep_pair : children){
-        // only inform the txn which wasn't aborted
-        if (dep_pair.second != READ_WRITE_){
-            if (dep_pair.first != nullptr){
-                if (dep_pair.first->status == RUNNING  ) {
-                    dep_pair.first->set_abort(5);
-                    dep_pair.first->lock_abort = true;
-#if PF_CS
-                    INC_STATS(this->get_thd_id(), cascading_abort_cnt, 1);
+#if CHILDOPT
+//    txn_man* txn_table[64] = {nullptr};   // 这里假设最多支持 64 个事务
+    std::vector<txn_man*> direct_depents;
+    uint64_t bitmap = children.load(std::memory_order_relaxed);  // 读取原子变量
+    for (int i = 0; i < 64; ++i) {
+        if (bitmap & (1ULL << i)) {  // 检查第 i 位是否为 1
+            auto depent_txn = glob_manager->get_txn_man(i);
+            direct_depents.push_back(depent_txn);  // 存储对应的 txn_man*
+        }
+    }
+#else
+    std::vector<txn_man*> direct_depents ;
+    for (const auto& child : children) {
+        txn_man* txn = child.first;
+        DepType dep_type = child.second;
+        direct_depents.push_back(txn);  // 存储对应的 txn_man*
+    }
 #endif
+
+    for(auto & dep_pair : direct_depents){
+        // only inform the txn which wasn't aborted
+//        if (dep_pair.second != READ_WRITE_){
+            if (dep_pair != nullptr){
+                if (dep_pair->status == RUNNING  ) {
+                    dep_pair->set_abort(5);
+                    dep_pair->lock_abort = true;
+//#if PF_CS
+//                    INC_STATS(this->get_thd_id(), cascading_abort_cnt, 1);
+//#endif
                 }
-            }
+//            }
         }
     }
 
+#if PF_CS
+    INC_STATS(txn->get_thd_id(), time_get_cs, get_sys_clock() - release_cs);
+    this->wait_latch_time = this->wait_latch_time + (get_sys_clock() - release_cs);
+#endif
+
     parents.clear();
+#if CHILDOPT
+    children.store(0, std::memory_order_relaxed);
+#else
     children.clear();
+#endif
 }
 
 
-void txn_man::addDependencies(std::unordered_map<uint64_t, std::set<txn_man*>*> *adjacencyList,
-                              txn_man *txn) {
-    auto direct_depents = (txn->children);
+void txn_man::addDependencies(std::unordered_map<uint64_t, std::set<txn_man*>*> *adjacencyList, txn_man *txn) {
+#if CHILDOPT
+//    txn_man* txn_table[64] = {nullptr};  // 这里假设最多支持 64 个事务
+    std::vector<txn_man*> direct_depents;
+    uint64_t bitmap = txn->children.load(std::memory_order_relaxed);  // 读取原子变量
+    for (int i = 0; i < 64; ++i) {
+        if (bitmap & (1ULL << i)) {  // 检查第 i 位是否为 1
+            auto depent_txn = glob_manager->get_txn_man(i);
+            direct_depents.push_back(depent_txn);  // 存储对应的 txn_man*
+        }
+    }
+#else
+    std::vector<txn_man*> direct_depents ;
+    for (const auto& child :  txn->children) {
+        txn_man* txn = child.first;
+        DepType dep_type = child.second;
+        direct_depents.push_back(txn);  // 存储对应的 txn_man*
+    }
+#endif
+
+//    auto direct_depents = (txn->children);
     auto *curr_depts = new std::set<txn_man *>();
     adjacencyList->insert(std::make_pair(txn->get_thd_id(), curr_depts));
 
     std::stack<txn_man *> dep_stack;
     for (auto &dep_pair: direct_depents) {
-        auto dep_txn = dep_pair.first;
+        auto dep_txn = dep_pair;
         if (dep_txn != nullptr && dep_txn->status == RUNNING ) {
             dep_stack.push(dep_txn);
             adjacencyList->at(txn->get_thd_id())->insert(dep_txn); // to <- from
@@ -283,12 +369,35 @@ void txn_man::addDependencies(std::unordered_map<uint64_t, std::set<txn_man*>*> 
                 auto *curr_depts = new std::set<txn_man *>();
                 adjacencyList->insert(std::make_pair(dep_txn_->get_thd_id(), curr_depts));
 
-                auto dep_txn_deps = (dep_txn_->children);
+//                auto dep_txn_deps = (dep_txn_->children);
+#if CHILDOPT
+                std::vector<txn_man*> dep_txn_deps;
+                {
+//                    txn_man* txn_table[64];
+                    uint64_t bitmap1 = dep_txn_->children.load(std::memory_order_relaxed);  // 读取原子变量
+                    for (int i = 0; i < 64; ++i) {
+                        if (bitmap1 & (1ULL << i)) {  // 检查第 i 位是否为 1
+                            auto depent_txn = glob_manager->get_txn_man(i);
+                            dep_txn_deps.push_back(depent_txn);  // 存储对应的 txn_man*
+                        }
+                    }
+                }
+#else
+                std::vector<txn_man*> dep_txn_deps;
+                {
+                    std::vector<txn_man*> direct_depents ;
+                    for (const auto& child : dep_txn_->children) {
+                        txn_man* txn = child.first;
+                        DepType dep_type = child.second;
+                        direct_depents.push_back(txn);  // 存储对应的 txn_man*
+                    }
+                }
+#endif
                 if (!dep_txn_deps.empty()){
                     for (auto &dep_: dep_txn_deps) {
-                        if (dep_.first != nullptr && dep_.first->status == RUNNING){
-                            dep_stack.push(dep_.first);
-                            adjacencyList->at(dep_txn_->get_thd_id())->insert(dep_.first);
+                        if (dep_ != nullptr && dep_->status == RUNNING){
+                            dep_stack.push(dep_);
+                            adjacencyList->at(dep_txn_->get_thd_id())->insert(dep_);
                         }
                     }
                 }

@@ -15,8 +15,11 @@ public :
 	RC init_schema(string schema_file);
 	RC get_txn_man(txn_man *& txn_manager, thread_t * h_thd);
 	int key_to_part(uint64_t key);
-	INDEX * the_index;
-	table_t * the_table;
+//	INDEX * the_index;
+//	table_t * the_table;
+
+    index_base * the_index;
+    table_t * the_table;
 #if CC_ALG == IC3
 	SC_PIECE * get_cedges(TPCCTxnType type, int idx) {return NULL;};
 #endif

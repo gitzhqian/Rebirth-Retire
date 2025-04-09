@@ -19,22 +19,23 @@ public:
     // [DL_DETECT] txnids are the txn_ids that current txn is waiting for.
     RC lock_get(lock_t type, txn_man * txn, Access * access);
     RC lock_get(lock_t type, txn_man * txn, uint64_t* &txnids, int &txncnt, Access * access);
-    RC lock_release(LockEntry * entry);
+    RC lock_release(txn_man * txn);
     void lock(txn_man * txn);
     void unlock(txn_man * txn);
 
 private:
-#if LATCH == LH_SPINLOCK
-    pthread_spinlock_t * latch;
-#elif LATCH == LH_MUTEX
+//#if LATCH == LH_SPINLOCK
+//    pthread_spinlock_t * latch;
+//#elif LATCH == LH_MUTEX
+//    pthread_mutex_t * latch;
+//#else
+//    mcslock * latch;
+//#endif
     pthread_mutex_t * latch;
-#else
-    mcslock * latch;
-#endif
     bool blatch;
 
     bool 		         conflict_lock(lock_t l1, lock_t l2);
-    static LockEntry *   get_entry(Access * access);
+    LockEntry *   get_entry(Access * access);
     static void 		 return_entry(LockEntry * entry);
     row_t * _row;
     lock_t lock_type;

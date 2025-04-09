@@ -23,6 +23,8 @@ RC ycsb_wl::init() {
 	next_tid = 0;
 	string path = "./benchmarks/YCSB_schema.txt";
 
+    path="/home/zhangqian/papers/hotspot-friend/rebirth-retire/Rebirth-Retire/benchmarks/YCSB_schema.txt";
+
 	init_schema( path );
 
 	init_table_parallel();
@@ -32,8 +34,17 @@ RC ycsb_wl::init() {
 
 RC ycsb_wl::init_schema(string schema_file) {
 	workload::init_schema(schema_file);
-	the_table = tables["MAIN_TABLE"]; 	
-	the_index = indexes["MAIN_INDEX"];
+//	the_table = tables["MAIN_TABLE"];
+//	the_index = indexes["MAIN_INDEX"];
+
+    the_table = tables["MAIN_TABLE"];
+    the_index = indexes["MAIN_INDEX"];
+
+    tables_[0] = the_table;
+    tables_[1] = NULL;
+
+    indexes_[0] = the_index;
+    indexes_[1] = NULL;
 	return RCOK;
 }
 	

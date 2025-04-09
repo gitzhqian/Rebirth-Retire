@@ -178,8 +178,13 @@ map<string, string> g_params;
 UInt32 g_max_items = 10000;
 UInt32 g_cust_per_dist = 2000;
 #else
+#if NUM_WH > 20
 UInt32 g_max_items = 100000;
 UInt32 g_cust_per_dist = 3000;
+#else
+UInt32 g_max_items = 10000;
+UInt32 g_cust_per_dist = 2000;
+#endif
 #endif
 uint64_t g_max_orderline = uint64_t(1) << 32;
 

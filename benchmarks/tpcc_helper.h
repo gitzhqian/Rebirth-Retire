@@ -17,6 +17,9 @@ uint64_t stockKey(uint64_t s_i_id, uint64_t s_w_id);
 uint64_t Lastname(uint64_t num, char* name);
 
 extern drand48_data ** tpcc_buffer;
+extern uint64_t C_255, C_1023, C_8191;
+void InitNURand(uint64_t thd_id);
+
 // return random data from [0, max-1]
 uint64_t RAND(uint64_t max, uint64_t thd_id);
 // random number from [x, y]
@@ -34,6 +37,9 @@ uint64_t wh_to_part(uint64_t wid);
 
 // ORDER_IDX
 uint64_t orderKey(uint64_t o_id, uint64_t o_d_id, uint64_t o_w_id);
+// ORDER_CUST_IDX
+uint64_t orderCustKey(int64_t o_id, uint64_t o_c_id, uint64_t o_d_id,
+                      uint64_t o_w_id);
 // NEWORDER_IDX
 uint64_t neworderKey(uint64_t o_id, uint64_t o_d_id, uint64_t o_w_id);
 // ORDERED_ORDERLINE_IDX

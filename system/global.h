@@ -275,3 +275,18 @@ typedef tbb::concurrent_unordered_map<uint64_t, write_set_element>  WriteSet_Mix
 #define UINT64_MAX 		18446744073709551615UL
 #endif // UINT64_MAX
 
+inline uint64_t get_clock_count() {
+#ifdef __i386__
+    uint64_t ret;
+	__asm__ volatile ("rdtsc" : "=A" (ret));
+	return ret;
+#elif __x86_64__
+    uint32_t low, high;
+    __asm__ volatile("rdtsc" : "=a" (low), "=d" (high));
+    return (uint64_t)low | (((uint64_t)high) << 32);
+#else
+    // avoid compiler complaints
+	return 0;
+#endif
+}
+

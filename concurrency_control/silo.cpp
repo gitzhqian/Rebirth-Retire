@@ -51,9 +51,14 @@ txn_man::validate_silo()
         }
         for (int i = 0; i < row_cnt - wr_cnt; i ++) {
             Access * access = accesses[ read_set[i] ];
-            if (access->orig_row->manager->get_tid() != accesses[read_set[i]]->tid) {
+            if (access->orig_row->is_deleted){
                 rc = Abort;
                 goto final;
+            }else{
+                if (access->orig_row->manager->get_tid() != accesses[read_set[i]]->tid) {
+                    rc = Abort;
+                    goto final;
+                }
             }
         }
     }
@@ -149,11 +154,19 @@ txn_man::validate_silo()
         _cur_tid ++;
 
     final:
+
+    rc = apply_index_changes(rc);
+
     if (rc == Abort) {
         for (int i = 0; i < num_locks; i++)
             accesses[ write_set[i] ]->orig_row->manager->release();
 //		cleanup(rc);
     } else {
+//        for (UInt32 i = 0; i < insert_cnt; i++) {
+//			row_t * row = insert_rows[i];
+//      		row->manager->set_tid(_cur_tid);  // unlocking is done as well
+//		}
+
         for (int i = 0; i < wr_cnt; i++) {
             Access * access = accesses[ write_set[i] ];
             access->orig_row->manager->write(access->data, _cur_tid );

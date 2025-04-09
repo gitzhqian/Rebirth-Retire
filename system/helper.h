@@ -128,7 +128,7 @@
 	if (entry->prev) entry->prev->next = newentry; \
 	entry->prev = newentry; \
 	if (lhead == entry) lhead = newentry; \
-}
+} \
 
 /************************************************/
 // STATS helper

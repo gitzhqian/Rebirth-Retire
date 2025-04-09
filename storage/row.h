@@ -1,6 +1,7 @@
 #pragma once
 
 #include "global.h"
+#include <atomic>
 
 #define DECL_SET_VALUE(type) \
 	void set_value(int col_id, type value);
@@ -33,6 +34,7 @@ class Row_ts;
 class Row_occ;
 class Row_tictoc;
 class Row_silo;
+class Row_mocc;
 class Row_vll;
 class Row_ww;
 class Row_bamboo;
@@ -59,7 +61,7 @@ public:
 
     table_t * get_table();
     Catalog * get_schema();
-    const char * get_table_name();
+    std::string get_table_name();
     uint64_t get_field_cnt();
     uint64_t get_tuple_size();
     uint64_t get_row_id() { return _row_id; };
@@ -116,10 +118,13 @@ public:
 #elif CC_ALG == WOUND_WAIT
     void return_row(LockEntry * lock_entry, RC rc);
 #endif
-#if CC_ALG == WOUND_WAIT || CC_ALG == WAIT_DIE || CC_ALG == NO_WAIT || CC_ALG == DL_DETECT
+
+#if CC_ALG == WOUND_WAIT
     void return_row(access_t type, row_t * row, LockEntry * lock_entry);
 #endif
+#if CC_ALG == TIMESTAMP || CC_ALG == MVCC || CC_ALG == OCC || CC_ALG == TICTOC || CC_ALG == SILO || CC_ALG == MOCC || CC_ALG == HSTORE || CC_ALG == VLL || CC_ALG == WAIT_DIE || (CC_ALG == NO_WAIT) || (CC_ALG == DL_DETECT)
     void return_row(access_t type, txn_man * txn, row_t * row);
+#endif
 
 #if CC_ALG == DL_DETECT || CC_ALG == NO_WAIT || CC_ALG == WAIT_DIE
     Row_lock * manager;
@@ -135,6 +140,12 @@ public:
   	Row_tictoc * manager;
   #elif CC_ALG == SILO
   	Row_silo * manager;
+  #elif CC_ALG == MOCC
+    Row_mocc * manager;
+    void increase_temperature();
+    double get_temperature();
+  #elif CC_ALG == OCC
+    Row_occ * manager;
   #elif CC_ALG == VLL
   	Row_vll * manager;
   #elif CC_ALG == WOUND_WAIT
@@ -148,10 +159,18 @@ public:
 #endif
     char * data;
     table_t * table;
+
+    volatile uint8_t	 is_deleted = false;
+    int index_cnt = -1;
 private:
     // primary key should be calculated from the data stored in the row.
     uint64_t 		_primary_key;
     uint64_t		_part_id;
     uint64_t 		_row_id;                // equal to get_sys_clock() [can't be used to uniquely identify a tuple]
+
+    uint64_t 		version = 0;
+#if CC_ALG == MOCC
+    std::atomic<double> temperature ;
+#endif
 };
 

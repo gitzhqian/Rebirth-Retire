@@ -70,7 +70,11 @@ enum {
     OL_D_ID,
     OL_W_ID,
     OL_NUMBER,
-    OL_I_ID
+    OL_I_ID,
+    OL_DELIVERY_D,
+    OL_QUANTITY,
+    OL_AMOUNT,
+    OL_SUPPLY_W_ID
 };
 enum {
     I_ID,
@@ -100,15 +104,15 @@ enum {
 enum {
     D_ID,
     D_W_ID,
+    D_NEXT_O_ID,
+    D_TAX,
+    D_YTD,
     D_NAME,
     D_STREET_1,
     D_STREET_2,
     D_CITY,
     D_STATE,
-    D_ZIP,
-    D_TAX,
-    D_YTD,
-    D_NEXT_O_ID
+    D_ZIP
 };
 enum {
     C_ID,
@@ -196,7 +200,6 @@ enum {
     S_REMOTE_CNT,
     S_DATA
 };
-
 
 #endif
 

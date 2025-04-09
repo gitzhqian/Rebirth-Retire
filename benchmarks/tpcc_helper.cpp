@@ -2,6 +2,7 @@
 #include "tpcc_helper.h"
 
 drand48_data ** tpcc_buffer;
+uint64_t C_255, C_1023, C_8191;
 
 uint64_t distKey(uint64_t d_id, uint64_t d_w_id)  {
     return d_w_id * DIST_PER_WARE + d_id;
@@ -31,6 +32,12 @@ uint64_t custNPKey(char * c_last, uint64_t c_d_id, uint64_t c_w_id) {
 uint64_t orderKey(uint64_t o_id, uint64_t o_d_id, uint64_t o_w_id) {
     // Use negative o_id to allow reusing the current index interface.
     return distKey(o_d_id, o_w_id) * g_max_orderline + (g_max_orderline - o_id);
+}
+uint64_t orderCustKey(int64_t o_id, uint64_t o_c_id, uint64_t o_d_id,
+                      uint64_t o_w_id) {
+    // Use negative o_id to allow reusing the current index interface.
+    return distKey(o_d_id, o_w_id) * g_cust_per_dist * g_max_orderline +
+           o_c_id * g_max_orderline + (g_max_orderline - o_id);
 }
 uint64_t neworderKey(uint64_t o_id, uint64_t o_d_id, uint64_t o_w_id) {
     return distKey(o_d_id, o_w_id) * g_max_orderline + (g_max_orderline - o_id);
@@ -89,6 +96,12 @@ uint64_t RAND(uint64_t max, uint64_t thd_id) {
 
 uint64_t URand(uint64_t x, uint64_t y, uint64_t thd_id) {
     return x + RAND(y - x + 1, thd_id);
+}
+
+void InitNURand(uint64_t thd_id) {
+    C_255 = (uint64_t)URand(0, 255, thd_id);
+    C_1023 = (uint64_t)URand(0, 1023, thd_id);
+    C_8191 = (uint64_t)URand(0, 8191, thd_id);
 }
 
 uint64_t NURand(uint64_t A, uint64_t x, uint64_t y, uint64_t thd_id) {

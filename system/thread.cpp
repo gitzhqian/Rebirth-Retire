@@ -29,6 +29,7 @@ void thread_t::init(uint64_t thd_id, workload * workload) {
     wound_entry = new std::vector<std::string>();
 
 #if CC_ALG == REBIRTH_RETIRE
+    _curr_ts = 0;
     free_list = new std::vector<Version *>();
     total_sz = 900000;
 //    for (int i = 0; i < total_sz; ++i) {
@@ -165,22 +166,21 @@ RC thread_t::run() {
                 if (unlikely(m_txn->get_ts() == 0))
                     m_txn->set_ts(get_next_ts());
 #elif CC_ALG == REBIRTH_RETIRE
-//        m_txn->hotspot_friendly_txn_id = (get_thd_id() << 32) | (get_sys_clock() & 0xffffffff);
-//#if DEADLOCK_DETECTION
-//        m_txn->InsertWaitingSet(m_txn->get_hotspot_friendly_txn_id());               // Initialize waiting set
-//#endif
         m_txn->set_ts(0);
-//        m_txn->status = RUNNING;
-//        m_txn->ready_abort = false;
-//        m_txn->rr_semaphore = 0;
         m_txn->parents.clear();
+#if CHILDOPT
+        m_txn->children.store(0, std::memory_order_relaxed);
+#else
         m_txn->children.clear();
+#endif
         m_txn->timestamp_v = 0;
+        m_txn->read_only = false;
+        m_txn->is_long = false;
+#endif
+
+#if  CC_ALG == WOUND_WAIT || CC_ALG == BAMBOO || CC_ALG == DL_DETECT || CC_ALG == REBIRTH_RETIRE
         m_txn->lock_ready = false;
         m_txn->lock_abort = false;
-
-//        assert(m_txn->hotspot_friendly_semaphore == 0);
-//        assert(m_txn->hotspot_friendly_dependency->empty());
 #endif
 
         m_txn->set_txn_id(get_thd_id() + thd_txn_id * g_thread_cnt);
@@ -211,12 +211,6 @@ RC thread_t::run() {
                 // But we advance the global ts here to simplify the implementation. However, the final
                 // results should be the same.
                 m_txn->start_ts = get_next_ts();
-#endif
-
-#if PF_ABORT
-//        m_txn->start_sys_clock = get_sys_clock();
-//        m_txn->wound = false;
-//        m_txn->wound_cascad = false;
 #endif
 
         if (rc == RCOK)
@@ -298,15 +292,8 @@ RC thread_t::run() {
             auto time_wait_passive = m_txn->wait_passive_retire;
             DEC_STATS(get_thd_id(), time_abort, time_wait_passive);
             INC_STATS(get_thd_id(), time_wait, time_wait_passive);
-//#if PF_ABORT
-//            if (m_txn->wound){
-//                INC_STATS(get_thd_id(), time_wound, timespan);
-//            }
-//            if (m_txn->wound_cascad){
-//                INC_STATS(get_thd_id(), time_wound_cascad, timespan);
-//            }
-//#endif
             INC_STATS(get_thd_id(), abort_cnt, 1);
+
 #if WORKLOAD == YCSB
             if (unlikely(g_long_txn_ratio > 0)) {
                 if ( ((ycsb_query *) m_query)->request_cnt > REQ_PER_QUERY)
@@ -413,11 +400,8 @@ ts_t thread_t::get_next_ts() {
         _curr_ts ++;
         uint64_t time = _curr_ts;
         uint64_t thd_id = get_thd_id();
-        uint64_t time_part = time & ((1ULL << 48) - 1);  // 低 48 位
-        uint64_t thd_id_part = thd_id & ((1ULL << 16) - 1);  // 低 16 位
-        // 将 time 的低 48 位移到高 16 位位置，并加上 thd_id 的低 16 位
-        uint64_t timestamp = (time_part << 16) | thd_id_part;
-        _curr_ts = timestamp;
+        uint64_t timestamp = (time << 8) | (thd_id & 0xFF);
+        return timestamp;
         #endif
 #else
         _curr_ts = glob_manager->get_ts(get_thd_id());

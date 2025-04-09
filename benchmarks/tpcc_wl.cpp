@@ -12,6 +12,8 @@
 #include "txn.h"
 #include "mem_alloc.h"
 
+
+
 RC tpcc_wl::init() {
     workload::init();
     string path = "./benchmarks/";
@@ -20,6 +22,8 @@ RC tpcc_wl::init() {
 #else
     path += "TPCC_full_schema.txt";
 #endif
+
+    path="/home/zhangqian/papers/hotspot-friend/vldb/revision-0316/Rebirth-Retire/benchmarks/TPCC_full_schema.txt";
 
     cout << "reading schema file: " << path << endl;
     init_schema( path.c_str() );
@@ -37,6 +41,7 @@ RC tpcc_wl::init_schema(const char * schema_file) {
     workload::init_schema(schema_file);
     t_warehouse = tables["WAREHOUSE"];
     t_district = tables["DISTRICT"];
+    t_district_ext = tables["DISTRICT-EXT"];
     t_customer = tables["CUSTOMER"];
     t_history = tables["HISTORY"];
     t_neworder = tables["NEW-ORDER"];
@@ -48,13 +53,50 @@ RC tpcc_wl::init_schema(const char * schema_file) {
     i_item = indexes["ITEM_IDX"];
     i_warehouse = indexes["WAREHOUSE_IDX"];
     i_district = indexes["DISTRICT_IDX"];
+    i_district_ext = indexes["DISTRICT_EXT_IDX"];
     i_customer_id = indexes["CUSTOMER_ID_IDX"];
     i_customer_last = indexes["CUSTOMER_LAST_IDX"];
     i_stock = indexes["STOCK_IDX"];
-
     i_order = indexes["ORDER_IDX"];
+    i_order_cust = indexes["ORDER_CUST_IDX"];
     i_neworder = indexes["NEWORDER_IDX"];
     i_orderline = indexes["ORDERLINE_IDX"];
+
+    tables_[0] = t_item;
+    tables_[1] = t_warehouse;
+    tables_[2] = t_district;
+    tables_[3] = t_district_ext;
+    tables_[4] = t_customer;
+    tables_[5] = t_history;
+    tables_[6] = t_stock;
+    tables_[7] = t_order;
+    tables_[8] = t_orderline;
+    tables_[9] = t_neworder;
+    tables_[10] = NULL;
+
+    indexes_[0] = i_item;
+    indexes_[1] = i_warehouse;
+    indexes_[2] = i_district;
+    indexes_[3] = i_district_ext;
+    indexes_[4] = i_customer_id;
+    indexes_[5] = i_customer_last;
+    indexes_[6] = i_stock;
+    indexes_[7] = i_order;
+    indexes_[8] = i_order_cust;
+    indexes_[9] = i_neworder;
+    indexes_[10] = i_orderline;
+    indexes_[11] = NULL;
+    index_2_table_[0] = 0;
+    index_2_table_[1] = 1;
+    index_2_table_[2] = 2;
+    index_2_table_[3] = 3;
+    index_2_table_[4] = 4;
+    index_2_table_[5] = 4;
+    index_2_table_[6] = 6;
+    index_2_table_[7] = 7;
+    index_2_table_[8] = 7;
+    index_2_table_[9] = 9;
+    index_2_table_[10] = 8;
 
     return RCOK;
 }
@@ -74,17 +116,30 @@ RC tpcc_wl::init_table() {
 //		- new order
 //		- order line
 /**********************************/
-    tpcc_buffer = new drand48_data * [g_num_wh];
-    pthread_t * p_thds = new pthread_t[g_num_wh - 1];
-    for (uint32_t i = 0; i < g_num_wh - 1; i++) {
-        pthread_create(&p_thds[i], NULL, threadInitWarehouse, this);
-    }
-    threadInitWarehouse(this);
-    for (uint32_t i = 0; i < g_num_wh - 1; i++) {
-        pthread_join(p_thds[i], NULL);
-    }
+//    tpcc_buffer = new drand48_data * [g_num_wh];
+//    pthread_t * p_thds = new pthread_t[g_num_wh - 1];
+//    for (uint32_t i = 0; i < g_num_wh - 1; i++) {
+//        pthread_create(&p_thds[i], NULL, threadInitWarehouse, this);
+//    }
+//    threadInitWarehouse(this);
+//    for (uint32_t i = 0; i < g_num_wh - 1; i++) {
+//        pthread_join(p_thds[i], NULL);
+//    }
 
-    tpcc_wl * wl = (tpcc_wl *)this;
+    int wh_thd_max = std::max(g_num_wh, g_thread_cnt);
+    tpcc_buffer = new drand48_data*[wh_thd_max];
+
+    for (int i = 0; i < wh_thd_max; i++) {
+        tpcc_buffer[i] = (drand48_data*)mem_allocator.alloc(sizeof(drand48_data), -1);
+        srand48_r(i + 1, tpcc_buffer[i]);
+    }
+    InitNURand(0);
+
+    tpcc_wl* wl = (tpcc_wl*)this;
+    wl->init_tab_item();
+    for (int i = 0; i < g_num_wh; ++i) {
+        threadInitWarehouse(this);
+    }
 //    wl->init_tab_nation();
 //    wl->init_tab_region();
 //    wl->init_tab_supplier();
@@ -223,10 +278,15 @@ void tpcc_wl::init_tab_dist(uint64_t wid) {
         row_t * row;
         uint64_t row_id;
         t_district->get_new_row(row, 0, row_id);
-        row->set_primary_key(did);
+        row->set_primary_key(distKey(did, wid));
 
         row->set_value(D_ID, did);
         row->set_value(D_W_ID, wid);
+        row->set_value(D_NEXT_O_ID, uint64_t(3001));
+        double tax = (double)URand(0L,200L,wid-1)/1000.0;
+        double w_ytd=30000.00;
+        row->set_value(D_TAX, tax);
+        row->set_value(D_YTD, w_ytd);
         char name[10];
         MakeAlphaString(6, 10, name, wid-1);
         row->set_value(D_NAME, name);
@@ -243,11 +303,7 @@ void tpcc_wl::init_tab_dist(uint64_t wid) {
         char zip[9];
         MakeNumberString(9, 9, zip, wid-1); /* Zip */
         row->set_value(D_ZIP, zip);
-        double tax = (double)URand(0L,200L,wid-1)/1000.0;
-        double w_ytd=30000.00;
-        row->set_value(D_TAX, tax);
-        row->set_value(D_YTD, w_ytd);
-        row->set_value(D_NEXT_O_ID, 3001);
+
 
         index_insert(i_district, distKey(did, wid), row, wh_to_part(wid));
     }
@@ -363,11 +419,24 @@ void tpcc_wl::init_tab_cust(uint64_t did, uint64_t wid) {
         row->set_value(C_BALANCE, -10.0);
         row->set_value(C_YTD_PAYMENT, 10.0);
         row->set_value(C_PAYMENT_CNT, 1);
+//        uint64_t key;
+//        key = custNPKey(c_last, did, wid);
+//        index_insert(i_customer_last, key, row, wh_to_part(wid));
+//        key = custKey(cid, did, wid);
+//        index_insert(i_customer_id, key, row, wh_to_part(wid));
+
         uint64_t key;
         key = custNPKey(c_last, did, wid);
+        row->set_primary_key(key);
         index_insert(i_customer_last, key, row, wh_to_part(wid));
+
         key = custKey(cid, did, wid);
-        index_insert(i_customer_id, key, row, wh_to_part(wid));
+        row_t *row_new;
+
+        t_customer->get_new_row(row_new, 0, row_id);
+        row_new->set_primary_key(key);
+        memcpy(row_new->get_data(), row->get_data(), row->get_tuple_size());
+        index_insert(i_customer_id, key, row_new, wh_to_part(wid));
     }
 }
 
@@ -427,12 +496,19 @@ void tpcc_wl::init_tab_order(uint64_t did, uint64_t wid) {
         o_ol_cnt = URand(5, 15, wid-1);     // 5-15 order lines in each order
         row->set_value(O_OL_CNT, o_ol_cnt);
         row->set_value(O_ALL_LOCAL, 1);
-
         index_insert(i_order, ord_primary, row, wh_to_part(wid));
+
+        row_t *row_cust;
+        t_order->get_new_row(row_cust, 0, row_id);
+        row_cust->set_primary_key(orderCustKey(oid, cid, did, wid));
+        memcpy(row_cust->get_data(), row->get_data(), row->get_tuple_size());
+        index_insert(i_order_cust, orderCustKey(oid, cid, did, wid), row_cust, wh_to_part(wid));
         // ORDER-LINE
 
         for (uint64_t ol = 1; ol <= o_ol_cnt; ol++) {
             t_orderline->get_new_row(row, 0, row_id);
+            uint64_t ordline_primary = orderlineKey(ol, oid, did, wid);
+            row->set_primary_key(ordline_primary);
             row->set_value(OL_O_ID, oid);
             row->set_value(OL_D_ID, did);
             row->set_value(OL_W_ID, wid);
@@ -452,19 +528,18 @@ void tpcc_wl::init_tab_order(uint64_t did, uint64_t wid) {
             MakeAlphaString(24, 24, ol_dist_info, wid-1);
             row->set_value(OL_DIST_INFO, ol_dist_info);
 #endif
-
-            uint64_t ordline_primary = orderlineKey(ol, oid, did, wid);
             index_insert(i_orderline, ordline_primary, row, wh_to_part(wid));
         }
 
         // NEW ORDER
         if (oid > 2100) {
             t_neworder->get_new_row(row, 0, row_id);
+            uint64_t ordnew_primary = neworderKey(oid, did, wid);
+            row->set_primary_key(ordnew_primary);
             row->set_value(NO_O_ID, oid);
             row->set_value(NO_D_ID, did);
             row->set_value(NO_W_ID, wid);
 
-            uint64_t ordnew_primary = neworderKey(oid, did, wid);
             index_insert(i_neworder, ordnew_primary, row, wh_to_part(wid));
         }
     }
@@ -509,15 +584,20 @@ void tpcc_wl::init_permutation(uint64_t * perm_c_id, uint64_t wid) {
  * @return
  */
 void * tpcc_wl::threadInitWarehouse(void * This) {
-    tpcc_wl * wl = (tpcc_wl *) This;
-    int tid = ATOM_FETCH_ADD(wl->next_tid, 1);
-    uint32_t wid = tid + 1;
-    tpcc_buffer[tid] = (drand48_data *) _mm_malloc(sizeof(drand48_data), 64);
-    assert((uint64_t)tid < g_num_wh);
-    srand48_r(wid, tpcc_buffer[tid]);
+//    tpcc_wl * wl = (tpcc_wl *) This;
+//    int tid = ATOM_FETCH_ADD(wl->next_tid, 1);
+//    uint32_t wid = tid + 1;
+//    tpcc_buffer[tid] = (drand48_data *) _mm_malloc(sizeof(drand48_data), 64);
+//    assert((uint64_t)tid < g_num_wh);
+//    srand48_r(wid, tpcc_buffer[tid]);
 
-    if (tid == 0)
-        wl->init_tab_item();
+    tpcc_wl* wl = (tpcc_wl*)This;
+    int tid = ATOM_FETCH_ADD(wl->next_tid, 1);
+    set_affinity(tid % g_thread_cnt);
+    uint32_t wid = tid + 1;
+    mem_allocator.register_thread(tid % g_thread_cnt);
+//    if (tid == 0)
+//        wl->init_tab_item();
 
     wl->init_tab_wh( wid );
     wl->init_tab_dist( wid );

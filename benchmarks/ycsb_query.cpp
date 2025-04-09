@@ -315,7 +315,7 @@ void ycsb_query::gen_requests(uint64_t thd_id, workload * h_wl) {
               #else
                 assert(false);
             #endif
-            #elif NUM_HS == 2
+            #elif NUM_HS == 2       // [Multiple Hotspot]
                 uint64_t hs1_row_id = table_size - 1;
                 uint64_t hs2_row_id = table_size - 2;
                 double flip;
@@ -685,6 +685,7 @@ void ycsb_query::gen_requests(uint64_t thd_id, workload * h_wl) {
         double r;
         // get a random number r to determine read/write ratio
         drand48_r(&_query_thd->buffer, &r);
+
         if (r < local_read_perc) {
             req->rtype = RD;
         } else if (r >= local_read_perc && r <= g_write_perc + local_read_perc) {

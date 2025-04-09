@@ -14,6 +14,12 @@ public:
 	uint64_t part_num;
 	uint64_t * part_to_access;
     bool rerun;
+
+    uint64_t request_cnt = 0;
+    bool readonly = false;
+    bool read_committed = false;
+    bool ro_print = false;
+    TPCCTxnType type;
 };
 
 // All the querise for a particular thread.

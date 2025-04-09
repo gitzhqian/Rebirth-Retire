@@ -9,6 +9,7 @@
 #include "row_mvcc.h"
 #include "row_hekaton.h"
 #include "row_occ.h"
+#include "row_mocc.h"
 #include "row_tictoc.h"
 #include "row_silo.h"
 #include "row_vll.h"
@@ -27,6 +28,11 @@ RC row_t::init(table_t * host_table, uint64_t part_id, uint64_t row_id) {
     Catalog * schema = host_table->get_schema();
     int tuple_size = schema->get_tuple_size();
     data = (char *) _mm_malloc(sizeof(char) * tuple_size, 64);
+    this->version = 0;
+    this->is_deleted = false;
+#if CC_ALG == MOCC
+    this->temperature = 0;
+#endif
 #if CC_ALG == IC3
     txn_access = NULL;
     orig = NULL;
@@ -45,6 +51,9 @@ row_t::init_accesses(Access * access) {
 void row_t::init(int size)
 {
     data = (char *) _mm_malloc(size, 64);
+    this->table = NULL;
+    this->is_deleted = false;
+    this->version = 0;
 }
 
 RC
@@ -73,6 +82,8 @@ void row_t::init_manager(row_t * row) {
     manager = (Row_tictoc *) _mm_malloc(sizeof(Row_tictoc), 64);
 #elif CC_ALG == SILO
     manager = (Row_silo *) _mm_malloc(sizeof(Row_silo), 64);
+#elif CC_ALG == MOCC
+    manager = (Row_mocc *)  _mm_malloc(sizeof(Row_mocc), 64);
 #elif CC_ALG == VLL
     manager = (Row_vll *) mem_allocator.alloc(sizeof(Row_vll), _part_id);
 #elif CC_ALG == WOUND_WAIT
@@ -99,7 +110,7 @@ Catalog * row_t::get_schema() {
     return get_table()->get_schema();
 }
 
-const char * row_t::get_table_name() {
+std::string row_t::get_table_name() {
     return get_table()->get_table_name();
 };
 uint64_t row_t::get_tuple_size() {
@@ -262,7 +273,7 @@ RC row_t:: get_row(access_t type, txn_man * txn, row_t *& row, Access * access) 
       lock_t lt = (type == RD || type == SCAN)? LOCK_SH : LOCK_EX;
       #if CC_ALG == DL_DETECT
       uint64_t * txnids;
-      int txncnt;
+      int txncnt = 0;
 
       // 2-17 [BUG in BAMBOO] : DL_DETECT should provide 5 inputs, or there will be compiling error.
        rc = this->manager->lock_get(lt, txn, txnids, txncnt,access);
@@ -297,19 +308,27 @@ RC row_t:: get_row(access_t type, txn_man * txn, row_t *& row, Access * access) 
             txn->lock_abort = false;
         #endif
         INC_STATS(txn->get_thd_id(), wait_cnt, 1);
-        while (!txn->lock_ready && !txn->lock_abort)
+        while (!txn->lock_ready && !txn->lock_abort && !this->is_deleted)
         {
         #if CC_ALG == WAIT_DIE || (CC_ALG == WOUND_WAIT) || (CC_ALG == BAMBOO)
             continue;
         #elif CC_ALG == REBIRTH_RETIRE
-            #if !PASSIVE_RETIRE
+            #if PASSIVE_RETIRE == false
             uint64_t now = get_sys_clock();
-            if (now - starttime > g_timeout ) {
+            if (now - starttime > g_timeout) {
                 txn->lock_abort = true;
                 txn->status = ABORTED;
                 break;
             }
             #endif
+//
+//#if WAIT_RR
+//            if (this->manager->owner == nullptr){
+//
+//                this->retire_row() ->manager. .retire_row(access_id);
+//                break;
+//            }
+//#endif
             continue;
 
         #elif CC_ALG == DL_DETECT
@@ -350,18 +369,21 @@ RC row_t:: get_row(access_t type, txn_man * txn, row_t *& row, Access * access) 
 
         if (txn->lock_ready) {
           rc = RCOK;
-        } else if (txn->lock_abort) {
+        } else if (txn->lock_abort || this->is_deleted) {
           // only possible for wound-wait based algs.
           // check if txn is aborted, if aborted due to conflicts on this or other
           // try to release lock
+          txn->lock_abort = true;
           endtime = get_sys_clock();
           uint64_t timespan = endtime - starttime;
           INC_TMP_STATS(thd_id, time_wait, timespan);
-//          INC_STATS(thd_id, time_wait, timespan);
-//          txn->wait_latch_time = txn->wait_latch_time + timespan;
 
 #if (CC_ALG == WOUND_WAIT) || (CC_ALG == BAMBOO)
           return_row(access->lock_entry, Abort);
+#endif
+
+#if   CC_ALG == DL_DETECT
+          return_row(type, txn, NULL);
 #endif
           return Abort;
         }
@@ -369,7 +391,6 @@ RC row_t:: get_row(access_t type, txn_man * txn, row_t *& row, Access * access) 
         endtime = get_sys_clock();
         uint64_t timespan = endtime - starttime;
         INC_TMP_STATS(thd_id, time_wait, timespan);
-//        txn->wait_latch_time = txn->wait_latch_time + timespan;
       } else if (rc == FINISH) {
         // RAW optimization, need to return data for read
       }
@@ -413,7 +434,7 @@ RC row_t:: get_row(access_t type, txn_man * txn, row_t *& row, Access * access) 
         rc = this->manager->access(txn, R_REQ);
         row = txn->cur_row;
         return rc;
-#elif CC_ALG == TICTOC || CC_ALG == SILO
+#elif CC_ALG == TICTOC || CC_ALG == SILO || CC_ALG == MOCC
     // like OCC, tictoc also makes a local copy for each read/write
     row->table = get_table();
     TsType ts_type = (type == RD)? R_REQ : P_REQ;
@@ -440,25 +461,24 @@ void row_t::return_row(LockEntry * lock_entry, RC rc) {
 }
 #endif
 
-#if CC_ALG == WOUND_WAIT || CC_ALG == WAIT_DIE || CC_ALG == NO_WAIT || CC_ALG == DL_DETECT
-void row_t::return_row(access_t type, row_t * row, LockEntry * lock_entry) {
 #if CC_ALG == WOUND_WAIT
+void row_t::return_row(access_t type, row_t * row, LockEntry * lock_entry) {
+//#if CC_ALG == WOUND_WAIT
     // make committed writes globally visible
     if (type == WR) // must be commited, aborted write will be XP
         this->copy(row);
     this->manager->lock_release(lock_entry);
-#elif CC_ALG == WAIT_DIE || (CC_ALG == NO_WAIT) || (CC_ALG == DL_DETECT)
-    assert (row == NULL || row == this || type == XP);
-  if (type == XP) {// recover from previous writes.
-    this->copy(row);
-  }
-  this->manager->lock_release(lock_entry);
-#else
-  assert(false);
-#endif
+//#elif CC_ALG == WAIT_DIE || (CC_ALG == NO_WAIT) || (CC_ALG == DL_DETECT)
+//    assert (row == NULL || row == this || type == XP);
+//  if (type == XP) {// recover from previous writes.
+//    this->copy(row);
+//  }
+//  this->manager->lock_release(lock_entry);
+//#else
+//  assert(false);
+//#endif
 }
 #endif
-
 // the "row" is the row read out in get_row().
 // For locking based CC_ALG, the "row" is the same as "this".
 // For timestamp based CC_ALG, the "row" != "this", and the "row" must be freed.
@@ -466,17 +486,18 @@ void row_t::return_row(access_t type, row_t * row, LockEntry * lock_entry) {
 // delete during history cleanup.
 // For TIMESTAMP, the row will be explicity deleted at the end of access().
 // (cf. row_ts.cpp)
+#if CC_ALG == TIMESTAMP || CC_ALG == MVCC || CC_ALG == OCC || CC_ALG == TICTOC || CC_ALG == SILO || CC_ALG == MOCC || CC_ALG == HSTORE || CC_ALG == VLL || CC_ALG == WAIT_DIE || (CC_ALG == NO_WAIT) || (CC_ALG == DL_DETECT)
 void row_t::return_row(access_t type, txn_man * txn, row_t * row) {
 #if CC_ALG == TIMESTAMP || CC_ALG == MVCC
     // for RD or SCAN or XP, the row should be deleted.
     // because all WR should be companied by a RD
     // for MVCC RD, the row is not copied, so no need to free.
-#if CC_ALG == TIMESTAMP
-    if (type == RD || type == SCAN) {
-        row->free_row();
-        mem_allocator.free(row, sizeof(row_t));
-    }
-#endif
+    #if CC_ALG == TIMESTAMP
+        if (type == RD || type == SCAN) {
+            row->free_row();
+            mem_allocator.free(row, sizeof(row_t));
+        }
+    #endif
     if (type == XP) {
         this->manager->access(txn, XP_REQ, row);
     } else if (type == WR) {
@@ -492,14 +513,36 @@ void row_t::return_row(access_t type, txn_man * txn, row_t * row) {
 	row->free_row();
 	mem_allocator.free(row, sizeof(row_t));
 	return;
-#elif CC_ALG == TICTOC || CC_ALG == SILO
+#elif CC_ALG == TICTOC || CC_ALG == SILO || CC_ALG == MOCC
     assert (row != NULL);
 	return;
 #elif CC_ALG == HSTORE || CC_ALG == VLL
     return;
+#elif CC_ALG == WAIT_DIE || (CC_ALG == NO_WAIT) || (CC_ALG == DL_DETECT)
+    assert (row == NULL || row == this || type == XP);
+    if (type == XP) {// recover from previous writes.
+        this->copy(row);
+    }
+    this->manager->lock_release(txn);
 #else
     assert(false);
 #endif
 }
+#endif
 
+#if CC_ALG == MOCC
+void row_t::increase_temperature() {
+	while (true) {
+		double temp_old = temperature;
+		double temp_new = temp_old + pow(2, -temp_old);
+		if (temperature.compare_exchange_strong(temp_old, temp_new))
+			break;
+		asm volatile ("lfence" ::: "memory");
+	};
+}
 
+double row_t::get_temperature() {
+	return temperature;
+}
+
+#endif

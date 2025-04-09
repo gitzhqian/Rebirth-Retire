@@ -102,7 +102,7 @@ void Query_thd::init(workload * h_wl, int thread_id) {
         queries[qid].init(thread_id, h_wl, this);
 #elif WORKLOAD == TPCC
         new(&queries[qid]) tpcc_query();
-                queries[qid].init(thread_id, h_wl);
+        queries[qid].init(thread_id, h_wl);
 #endif
     }
 }

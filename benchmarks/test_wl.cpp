@@ -17,10 +17,10 @@ RC TestWorkload::init() {
 }
 
 RC TestWorkload::init_schema(const char * schema_file) {
-	workload::init_schema(schema_file);
-	the_table = tables["MAIN_TABLE"]; 	
-	the_index = indexes["MAIN_INDEX"];
-	return RCOK;
+//	workload::init_schema(schema_file);
+//	the_table = tables["MAIN_TABLE"];
+//	the_index = indexes["MAIN_INDEX"];
+//	return RCOK;
 }
 
 RC TestWorkload::init_table() {
