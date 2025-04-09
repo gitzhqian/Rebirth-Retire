@@ -41,7 +41,8 @@ and the resulting outputs are as follows:
 ```
 
 The following figure presents the results of  the evaluated protocols under the YCSB workloads:
-![ycsb-result](https://github.com/user-attachments/assets/5f9bd703-5f97-4973-b1ad-7c3d28720565)
+![ycsb-result](https://github.com/user-attachments/assets/ba4381b7-b309-4a99-8ea7-73a977becc91)
+
 
  
 
