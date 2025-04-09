@@ -21,9 +21,11 @@ The major changes made in this repository:
     Rebirth-Retire: A Concurrency Control Protocol Adaptable to Different Levels of Contention
     Qian Zhang, Jianhao Wei, Yifan Li, Xueqing Gong
 ```
-- focused on support for: DL_DETECT, WOUND_WAIT, BamBoo, SILO, Rebirth-Retire
+- focused on support for: DL_DETECT, WOUND_WAIT, BamBoo, SILO, Rebirth-Retire, TicToc, MOCC
 - updated runtime statistics to enable more detailed analysis of the time spent on different tasks during transaction execution
 - modified test scripts to facilitate easier evaluation and assessment
+- expanded Masstree index for improved indexing capabilities  
+- complete TPC-C benchmark implementation, supporting all five core transactions
 
 
 Build & Test & Results
@@ -39,7 +41,11 @@ and the resulting outputs are as follows:
 ```
 
 The following figure presents the results of  the evaluated protocols under the YCSB workloads:
-![ycsb-result](https://github.com/user-attachments/assets/0c7f66e2-b83a-43d2-835e-e78cbc6258a0)
+![cc-as-ycsb](https://github.com/user-attachments/assets/bdd51edf-1544-41ae-b27e-1078dac6c23c)
+
+
+
+ 
 
  
 
