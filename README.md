@@ -39,7 +39,11 @@ and the resulting outputs are as follows:
 ```
 
 The following figure presents the results of  the evaluated protocols under the YCSB workloads:
-![image](https://github.com/user-attachments/assets/5ea6d5f3-f692-4004-9c11-d5bd4002079e)
+![ycsb-result](https://github.com/user-attachments/assets/0c7f66e2-b83a-43d2-835e-e78cbc6258a0)
+
+ 
+
+
     
 Configure & Run
 ---------------
