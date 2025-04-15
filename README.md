@@ -19,7 +19,7 @@ The major changes made in this repository:
 - added support for Rebirth-Retire and its optimizations. Rebirth-Retire is a concurrency control protocol proposed in:
 ```
     Rebirth-Retire: A Concurrency Control Protocol Adaptable to Different Levels of Contention
-    Qian Zhang, Jianhao Wei, Yifan Li, Xueqing Gong
+    Qian Zhang, Jianhao Wei, Yifan Li, Yang Yang, Xueqing Gong
 ```
 - focused on support for: DL_DETECT, WOUND_WAIT, BamBoo, SILO, Rebirth-Retire, TicToc, MOCC
 - updated runtime statistics to enable more detailed analysis of the time spent on different tasks during transaction execution
