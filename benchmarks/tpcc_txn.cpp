@@ -95,54 +95,42 @@ RC tpcc_txn_man::run_payment(tpcc_query * query) {
         INTO :w_street_1, :w_street_2, :w_city, :w_state, :w_zip, :w_name
         FROM warehouse WHERE w_id=:w_id;
     +===================================================================*/
-
-    // TODO: for variable length variable (string). Should store the size of
-    //  the variable.
-    //BEGIN: [WAREHOUSE] RW
 #if CC_ALG == IC3
     warehouse_piece:
     begin_piece(0);
 #endif
     //1. update warehouse
     key = arg.w_id;
-//    INDEX * index = _wl->i_warehouse;
-//    item = index_read(index, key, wh_to_part(w_id));
     auto index_warehouse = _wl->i_warehouse;
     auto part_id = wh_to_part(w_id);
     r_wh_local = search(index_warehouse, key, part_id,  g_wh_update ? WR : RD);
-//    assert(item != NULL);
-//    r_wh = ((row_t *)item->location);
-//#if !COMMUTATIVE_OPS
-//    r_wh_local = get_row(r_wh, WR);
-//#else
-//    r_wh_local = get_row(r_wh, RD);
-//#endif
     if (r_wh_local == NULL) {
         return finish(Abort);
     }
 
-#if !COMMUTATIVE_OPS
-    //update the balance to the warehouse
-    r_wh_local->get_value(W_YTD, tmp_value);
-    if (g_wh_update) {
-        r_wh_local->set_value(W_YTD, tmp_value + arg.h_amount);
-    }
-#else
-    inc_value(W_YTD, query->h_amount); // will increment at commit time
-#endif
-    // bamboo: retire lock for wh
-#if (CC_ALG == BAMBOO) && (THREAD_CNT > 1) && !COMMUTATIVE_OPS
-    RETIRE_ROW(row_cnt)
-#endif
-#if CC_ALG == REBIRTH_RETIRE
-    #if PASSIVE_RETIRE
-           accesses[row_cnt-1]->lock_entry->has_write = true;
+    #if !COMMUTATIVE_OPS
+        //update the balance to the warehouse
+        r_wh_local->get_value(W_YTD, tmp_value);
+        if (g_wh_update) {
+            r_wh_local->set_value(W_YTD, tmp_value + arg.h_amount);
+        }
     #else
+        inc_value(W_YTD, query->h_amount); // will increment at commit time
+    #endif
+    if (g_wh_update) {
+    #if (CC_ALG == BAMBOO) && (THREAD_CNT > 1)
+        RETIRE_ROW(row_cnt)
+    #endif
+    #if CC_ALG == REBIRTH_RETIRE
+        #if PASSIVE_RETIRE
+         accesses[row_cnt-1]->lock_entry->has_write = true;
+        #else
          if (retire_row(row_cnt-1) == Abort) {
             return finish(Abort);
          }
+        #endif
     #endif
-#endif
+    }
     //get a copy of warehouse name
     tmp_str = r_wh_local->get_value(W_NAME);
     memcpy(w_name, tmp_str, 10);
@@ -151,6 +139,7 @@ RC tpcc_txn_man::run_payment(tpcc_query * query) {
     if (end_piece(0) != RCOK)
         goto warehouse_piece;
 #endif
+
 
 #if CC_ALG == IC3
     district_piece:
@@ -168,7 +157,6 @@ RC tpcc_txn_man::run_payment(tpcc_query * query) {
     +=====================================================*/
     //2. update district
     key = distKey(arg.d_id, arg.w_id);
-//    item = index_read(_wl->i_district, key, wh_to_part(w_id));
     auto r_dist_local = search(_wl->i_district, key, part_id, WR);
     if (r_dist_local == NULL) {
         return finish(Abort);
@@ -180,8 +168,7 @@ RC tpcc_txn_man::run_payment(tpcc_query * query) {
 #else
     inc_value(D_YTD, query->h_amount); // will increment at commit time
 #endif
-
-#if (CC_ALG == BAMBOO) && (THREAD_CNT > 1) && !COMMUTATIVE_OPS
+#if (CC_ALG == BAMBOO) && (THREAD_CNT > 1)
     RETIRE_ROW(row_cnt)
 #endif
 #if CC_ALG == REBIRTH_RETIRE
@@ -193,10 +180,10 @@ RC tpcc_txn_man::run_payment(tpcc_query * query) {
          }
     #endif
 #endif
-
     tmp_str = r_dist_local->get_value(D_NAME);
     memcpy(d_name, tmp_str, 10);
     d_name[10] = '\0';
+
 
 #if CC_ALG == IC3
     if(end_piece(1) != RCOK)
@@ -205,7 +192,6 @@ RC tpcc_txn_man::run_payment(tpcc_query * query) {
     customer_piece:
     begin_piece(2);
 #endif
-
     //3. update customer
     if (arg.by_last_name) {
         //3. update customer
@@ -230,7 +216,6 @@ RC tpcc_txn_man::run_payment(tpcc_query * query) {
          EXEC SQL UPDATE customer SET c_balance = :c_balance, c_data = :c_new_data
          WHERE c_w_id = :c_w_id AND c_d_id = :c_d_id AND c_id = :c_id;
      +======================================================================*/
-//    r_cust_local = get_row(r_cust, WR);
     if (r_cust_local == NULL) {
         return finish(Abort);
     }
@@ -266,11 +251,11 @@ RC tpcc_txn_man::run_payment(tpcc_query * query) {
     #endif
 #endif
 
+
 #if CC_ALG == IC3
     if(end_piece(2) != RCOK)
         goto customer_piece;
 #endif
-
     //update h_data according to spec
     char h_data[25];
     strncpy(h_data, w_name, 10);
@@ -707,27 +692,19 @@ RC tpcc_txn_man::run_new_order(tpcc_query * query) {
 #else // if CC_ALG != IC3
 
       for (uint64_t ol_number = 0; ol_number < ol_cnt; ol_number++) {
-        ol_i_id = arg.items[ol_number].ol_i_id;
-#if TPCC_USER_ABORT
+#if TPCC_USER_ABORT && CC_ALG == BAMBOO
         // XXX(zhihan): if key is invalid, abort. user-initiated abort
         // according to tpc-c documentation
-        if (ol_i_id == 0)
-          return finish(ERROR);
+        if (ol_i_id == 0) {
+            return finish(ERROR);
+        }
 #endif
+        ol_i_id = arg.items[ol_number].ol_i_id;
         ol_supply_w_id = arg.items[ol_number].ol_supply_w_id;
         ol_quantity = arg.items[ol_number].ol_quantity;
-        /*===========================================+
-        EXEC SQL SELECT i_price, i_name , i_data
-            INTO :i_price, :i_name, :i_data
-            FROM item
-            WHERE i_id = :ol_i_id;
-        +===========================================*/
+
         //6. search item
         key = ol_i_id;
-//        item = index_read(_wl->i_item, key, 0);
-//        assert(item != NULL);
-//        r_item = ((row_t *)item->location);
-//        r_item_local = get_row(r_item, RD);
         r_item_local = search(_wl->i_item, key, part_id, RD);
         if (r_item_local == NULL) {
             return finish(Abort);
@@ -748,13 +725,9 @@ RC tpcc_txn_man::run_new_order(tpcc_query * query) {
             WHERE s_i_id = :ol_i_id
             AND s_w_id = :ol_supply_w_id;
         +===============================================*/
+
         // 7. update stock
         stock_key = stockKey(ol_i_id, ol_supply_w_id);
-//        stock_index = _wl->i_stock;
-//        index_read(stock_index, stock_key, wh_to_part(ol_supply_w_id), stock_item);
-//        assert(item != NULL);
-//        r_stock = ((row_t *)stock_item->location);
-//        r_stock_local = get_row(r_stock, WR);
         r_stock_local = search(_wl->i_stock, stock_key, part_id, WR);
         if (r_stock_local == NULL) {
             return finish(Abort);
@@ -949,9 +922,6 @@ RC tpcc_txn_man::run_delivery(tpcc_query * query) {
 RC tpcc_txn_man::run_order_status(tpcc_query * query) {
 ///*	row_t * r_cust;
       auto& arg = query->args.order_status;
-      #if CC_ALG == REBIRTH_RETIRE
-      this->is_long = true;
-      #endif
 
       auto c_id = arg.c_id;
       auto w_id = arg.w_id;
@@ -980,9 +950,6 @@ RC tpcc_txn_man::run_order_status(tpcc_query * query) {
 
 RC tpcc_txn_man::run_stock_level(tpcc_query * query) {
   auto& arg = query->args.stock_level;
-      #if CC_ALG == REBIRTH_RETIRE
-      this->is_long = true;
-      #endif
 
   auto district = stock_level_getOId(arg.w_id, arg.d_id);
   if (district == NULL) {
@@ -1254,7 +1221,8 @@ bool tpcc_txn_man::stock_level_getStockCount(uint64_t ol_w_id, uint64_t ol_d_id,
     if (orderline_shared_row->is_deleted) continue;
     auto orderline = get_row(orderline_shared_row, RD);
     if (orderline == NULL) {
-        return false;
+        continue;
+//        return false;
     }
 
     uint64_t ol_i_id, ol_supply_w_id;
@@ -1290,7 +1258,8 @@ bool tpcc_txn_man::stock_level_getStockCount(uint64_t ol_w_id, uint64_t ol_d_id,
     auto part_id = wh_to_part(s_w_id);
 	auto row = search(index, key, part_id, RD);
     if (row == NULL){
-        return false;
+        continue;
+//        return false;
     }
 
     uint64_t s_quantity;

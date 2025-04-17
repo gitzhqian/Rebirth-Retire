@@ -36,11 +36,10 @@ struct Version {
     ts_t begin_ts;
     ts_t end_ts;
     access_t type;
-//    volatile ts_t *dynamic_txn_ts;  //pointing to the created transaction's ts
-    HReader *read_queue;
-    Version* prev;
-    Version* next;
     txn_man* retire;      // the txn_man of the uncommitted txn which updates the tuple version
+    HReader *read_queue;
+    Version* next;
+    Version* prev;
     row_t* data;
 
     Version(txn_man * txn):  begin_ts(INF), end_ts(INF),retire(txn),read_queue(nullptr),type(WR) {};
@@ -51,7 +50,6 @@ struct Version {
         this->read_queue = nullptr;
         this->retire = nullptr;
         this->type = XP;
-//        this->dynamic_txn_ts = new ts_t(0);
         this->prev = nullptr;
     }
 };
@@ -73,21 +71,21 @@ public:
     RC access(txn_man *txn, TsType type, Access *access);
     RC active_retire(RRLockEntry * entry);
     bool bring_next(txn_man * txn, txn_man * curr );
-    RC read_committed(txn_man * txn, Version* read_committed, uint64_t start_r_w, Access * access);
+    RC read_committed(txn_man * txn, Version* read_committed,
+                      uint32_t prefh_latest_, uint64_t start_r_w, Access * access);
 
 //    volatile bool blatch;
     Version *version_header;              // version header of a row's version chain (N2O)
     Version *latest;
-    std::list<RRLockEntry *> *entry_list;
+    std::list<RRLockEntry *> *wait_list;
     RRLockEntry * owner;
     UInt32 waiter_cnt;
 //    UInt32 retired_cnt;
+    uint32_t chain_threshold;
 
-#if PREFETCH
     Version **version_prefhs_;
     uint32_t prefh_len;
     uint32_t prefh_latest;
-#endif
 
 #if LATCH == LH_SPINLOCK
     pthread_spinlock_t * spinlock_row;
@@ -125,17 +123,41 @@ public:
         return entry;
     }
 
+#if PREFETCH
+    void append_version_prefhs(Version *new_version_ptr){
+        if ( (prefh_latest +1) >=  prefh_len){
+            // double
+            Version **temp = (Version **) _mm_malloc(sizeof(Version *) * prefh_len*2, 64);
+            uint32_t idx = prefh_latest;
+            for (uint32_t i = 0; i < prefh_len; i++) {
+                temp[i] = version_prefhs_[idx];
+                idx = (idx + 1) % prefh_len;
+                temp[i + prefh_len] = NULL;
+            }
+
+            prefh_latest = prefh_len - 1;
+            _mm_free(version_prefhs_);
+            version_prefhs_ = temp;
+
+            prefh_len *= 2;
+        }
+
+        prefh_latest = prefh_latest + 1;
+        version_prefhs_[prefh_latest] = new_version_ptr;
+    }
+#endif
+
     inline void list_rm(RRLockEntry* entry) {
         if (entry == nullptr) {
             return;  // 如果传入的 entry 为 nullptr，直接返回
         }
 
-        for (auto it = entry_list->begin(); it != entry_list->end(); ) {
+        for (auto it = wait_list->begin(); it != wait_list->end(); ) {
             // 检查 (*it) 和 (*it)->txn 是否为 nullptr
             if ((*it) != nullptr && (*it)->txn != nullptr) {
                 // 检查 txn 的线程 ID 是否匹配
                 if ((*it)->txn->get_thd_id() == entry->txn->get_thd_id()) {
-                    it = entry_list->erase(it);  // 删除元素并返回下一个有效的迭代器
+                    it = wait_list->erase(it);  // 删除元素并返回下一个有效的迭代器
                     if (waiter_cnt > 0) {
                         waiter_cnt--;  // 保证 waiter_cnt 不为负
                     }
@@ -150,10 +172,10 @@ public:
 
     inline void list_rm() {
         // 直接使用 entry_list.size() 来避免依赖外部计算的 sz
-        for (auto it = entry_list->begin(); it != entry_list->end(); ) {
+        for (auto it = wait_list->begin(); it != wait_list->end(); ) {
             // 如果元素为空，直接删除它
             if (*it == nullptr) {
-                it = entry_list->erase(it);  // 删除空元素，it 被更新为下一个有效迭代器
+                it = wait_list->erase(it);  // 删除空元素，it 被更新为下一个有效迭代器
                 // 减少 waiter_cnt，但保证 waiter_cnt 不小于 0
                 if (waiter_cnt > 0) {
                     waiter_cnt--;
@@ -162,7 +184,7 @@ public:
                 auto status_ = (*it)->status;
                 // 如果元素的状态是 LOCK_OWNER, LOCK_RETIRED, 或 LOCK_DROPPED，则删除
                 if (status_ == LOCK_OWNER || status_ == LOCK_RETIRED || status_ == LOCK_DROPPED) {
-                    it = entry_list->erase(it);  // 删除元素，it 被更新为下一个有效迭代器
+                    it = wait_list->erase(it);  // 删除元素，it 被更新为下一个有效迭代器
                     // 减少 waiter_cnt，但保证 waiter_cnt 不小于 0
                     if (waiter_cnt > 0) {
                         waiter_cnt--;
@@ -206,10 +228,10 @@ public:
 
         bool find = false;
         RRLockEntry* en = nullptr;
-        auto insert_before = entry_list->begin();
+        auto insert_before = wait_list->begin();
 
         // traverse the wait list, find the insert position
-        for (auto it = entry_list->begin(); it != entry_list->end(); ++it) {
+        for (auto it = wait_list->begin(); it != wait_list->end(); ++it) {
             en = *it;
 
             if (en == nullptr) {
@@ -231,9 +253,9 @@ public:
         }
 
         if (!find) {
-            entry_list->push_back(to_insert);   // insert the wait tail
+            wait_list->push_back(to_insert);   // insert the wait tail
         } else {
-            entry_list->insert(insert_before, to_insert);  // insert the find position
+            wait_list->insert(insert_before, to_insert);  // insert the find position
         }
 
         to_insert->status = LOCK_WAITER;
@@ -246,7 +268,7 @@ public:
     inline RRLockEntry * find_write_in_waiter(ts_t ts) {
         RRLockEntry * read = nullptr;
         RRLockEntry * en = nullptr;
-        for (auto it = entry_list->begin(); it != entry_list->end(); ++it) {
+        for (auto it = wait_list->begin(); it != wait_list->end(); ++it) {
             en = *it;
             if (en->type == LOCK_EX){
                 if ( (en->txn != nullptr) && (en->txn->get_ts() < ts)){
@@ -305,8 +327,9 @@ public:
             }
         }
 
-        if(version_header == nullptr){
-           return false;
+//        assert(version_header != nullptr);
+        if (version_header == nullptr) {
+            version_header = latest;
         }
         return true;
     }
@@ -333,7 +356,7 @@ public:
                     bring_out_waiter( entry ) ;
                 }
 
-                if (new_version != nullptr){
+                if (new_version != nullptr && new_version->type == WR){
                     new_version->type = AT;
                 }
             } else {
@@ -420,7 +443,7 @@ public:
         retry:
         uint64_t starttimeSort = get_sys_clock();
         if (curr_txn->status == ABORTED ) return false;
-        auto *adjacencyList = new std::unordered_map<uint64_t, std::set<txn_man*> *>(); // to<-from
+        auto *adjacencyList = new std::unordered_map<uint64_t, std::set<uint64_t> *>(); // to<-from
         auto ret = curr_txn->buildGraph(adjacencyList, curr_txn);
         if (!ret) {
 #if PF_CS
@@ -452,14 +475,12 @@ public:
                 auto dep_txn_o = version_o->retire;
                 if (dep_txn_o != nullptr) {
                     if (find) {
-                        version_o->type = AT;
                         curr_txn->wound_txn(dep_txn_o);
                         dep_txn_o->lock_abort = true;
                         wound_size++;
                     } else {
                         for (int j = 0; j < size_sort; ++j) {
                             if (sortedOrder->at(j).first == dep_txn_o->get_thd_id()) {
-                                version_o->type = AT;
                                 curr_txn->wound_txn(dep_txn_o);
                                 dep_txn_o->lock_abort = true;
                                 wound_size++;
@@ -473,6 +494,8 @@ public:
 #if PF_CS
         INC_STATS(curr_txn->get_thd_id(), time_verify,  get_sys_clock() - starttimeSort);
 #endif
+
+        if (curr_txn->status == ABORTED ) return false;
 
         // if size dep > 0 , then need to rebirth, other just wound
         size_dep = size_dep - wound_size;
@@ -490,9 +513,10 @@ public:
                     goto retry;
                 }
 #endif
+                next_ts = glob_manager->get_global_n_ts(depent_txn_thd);
                 if (depent_txn != nullptr){
-                    next_ts = glob_manager->get_ts(depent_txn_thd);
                     depent_txn->set_ts(next_ts);
+                    depent_txn->timestamp_v.fetch_add(1, std::memory_order_relaxed);
                 }
             }
         }
@@ -504,11 +528,10 @@ public:
                 auto dep_version = lower_than_me[i];
                 if (dep_version->type == AT) continue;
                 auto dep_txn_o = dep_version->retire;
-                if (dep_txn_o == nullptr){
-                    max_ts = std::max(max_ts, dep_version->begin_ts);
-                }else{
+                if (dep_txn_o != nullptr){
                     max_ts = std::max(max_ts, dep_txn_o->get_ts());
                 }
+
                 auto readers = dep_version->read_queue;
                 HReader *read_ = nullptr;
                 if (readers != nullptr) {
@@ -524,7 +547,7 @@ public:
                 }
             }
 
-            uint64_t defer_ts = curr_txn->increment_ts(max_ts);
+            uint64_t defer_ts = max_ts ;
             for (auto it = sortedOrder->begin(); it != sortedOrder->end(); ++it) {
                 auto depent_txn_thd_id = it->first;
                 auto depent_txn = glob_manager->get_txn_man(depent_txn_thd_id);
@@ -534,8 +557,8 @@ public:
                         goto retry;
                     }
 #endif
-                    if (depent_txn->get_ts() < defer_ts){
-                        defer_ts++;
+                    if (depent_txn->get_ts() <= defer_ts){
+                        defer_ts = defer_ts + 1;
                         depent_txn->set_ts(defer_ts);
                         depent_txn->timestamp_v.fetch_add(1, std::memory_order_relaxed);
                     }
@@ -556,14 +579,14 @@ public:
         auto size_dep = lower_than_me.size();
         for (int i = 0; i < size_dep; ++i) {
             auto version_o = lower_than_me[i];
-            version_o->type = AT;
+//            version_o->type = AT;
             auto dep_txn_o = version_o->retire;
             if (dep_txn_o != nullptr) {
                 curr_txn->wound_txn(dep_txn_o);
                 dep_txn_o->lock_abort = true;
-#if PF_CS
-                INC_STATS(curr_txn->get_thd_id(), find_circle_abort_depent, 1);
-#endif
+//#if PF_CS
+//                INC_STATS(curr_txn->get_thd_id(), find_circle_abort_depent, 1);
+//#endif
             }
         }
 

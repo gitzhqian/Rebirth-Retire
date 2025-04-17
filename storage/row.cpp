@@ -321,18 +321,11 @@ RC row_t:: get_row(access_t type, txn_man * txn, row_t *& row, Access * access) 
                 break;
             }
             #endif
-//
-//#if WAIT_RR
-//            if (this->manager->owner == nullptr){
-//
-//                this->retire_row() ->manager. .retire_row(access_id);
-//                break;
-//            }
-//#endif
+
             continue;
 
         #elif CC_ALG == DL_DETECT
-            uint64_t last_detect = starttime;
+          uint64_t last_detect = starttime;
           uint64_t last_try = starttime;
           uint64_t now = get_sys_clock();
           if (now - starttime > g_timeout ) {

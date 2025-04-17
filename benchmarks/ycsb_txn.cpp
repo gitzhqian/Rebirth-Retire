@@ -50,8 +50,11 @@ RC ycsb_txn_man::run_txn(base_query * query) {
         DEC_STATS(h_thd->get_thd_id(), run_time, get_sys_clock() - starttime);
     }
 
+
+#if CC_ALG == REBIRTH_RETIRE
     std::vector<row_t *> tmp_retire;
     std::vector<RRLockEntry *> tmp_locks;
+#endif
     for (uint32_t rid = 0; rid < m_query->request_cnt; rid ++) {
 #if CC_ALG == REBIRTH_RETIRE
         // REBIRTH_RETIRE: Abort txn actively(before executing next operation)

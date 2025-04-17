@@ -19,6 +19,7 @@ public:
     bool readonly = false;
     bool read_committed = false;
     bool ro_print = false;
+    bool is_long = false;
     TPCCTxnType type;
 };
 

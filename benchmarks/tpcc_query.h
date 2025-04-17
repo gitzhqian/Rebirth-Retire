@@ -34,6 +34,7 @@ struct tpcc_query_new_order {
     uint64_t c_id;
     uint64_t ol_cnt;
     uint64_t o_entry_d;
+    uint64_t rbk;
     struct Item_no* items;
     bool rollback;
     bool all_local;

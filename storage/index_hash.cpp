@@ -164,6 +164,10 @@ void BucketHeader::read_item(idx_key_t key, itemid_t * &item, std::string tname)
       break;
     cur_node = cur_node->next;
   }
-  M_ASSERT(cur_node->key == key, "Key does not exist!");
-  item = cur_node->items;
+//  M_ASSERT(cur_node->key == key, "Key does not exist!");
+  if (cur_node == nullptr || cur_node->key != key) {
+      item = nullptr;
+  } else {
+      item = cur_node->items;
+  }
 }

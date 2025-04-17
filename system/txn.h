@@ -196,7 +196,7 @@ public:
 
     std::vector<std::pair<txn_man*, DepType>> parents;
 #if CHILDOPT
-    std::atomic<uint64_t> children{0};  // 初始化为 0，所有线程位都是 0
+    std::array<uint8_t, MAX_THREAD> children_bitmap{};  // pre allocation
 #else
     tbb::concurrent_vector<std::pair<txn_man *, DepType>> children;
 #endif
@@ -367,26 +367,31 @@ public:
     RC                  validate_rr(RC rc);
     void                abort_process(txn_man * txn );
 
-    bool                topologicalSort(std::unordered_map<uint64_t, std::set<txn_man*> *> *adjacencyList,
+    bool                topologicalSort(std::unordered_map<uint64_t, std::set<uint64_t> *> *adjacencyList,
                                         std::vector<std::pair<uint64_t, std::pair<uint64_t , uint64_t>>> *sortedOrder,
                                         std::unordered_set<uint64_t> * i_depents);
-    bool                buildGraph(std::unordered_map<uint64_t, std::set<txn_man*> *> *adjacencyList,
+    bool                buildGraph(std::unordered_map<uint64_t, std::set<uint64_t> *> *adjacencyList,
                              txn_man *txn);
-    void                addDependencies(std::unordered_map<uint64_t, std::set<txn_man*>*> *adjacencyList,
+    void                addDependencies(std::unordered_map<uint64_t, std::set<uint64_t>*> *adjacencyList,
                                   txn_man *txn);
 
     RC                  retire_row(int access_cnt);
+
     uint64_t            increment_ts(uint64_t timestamp) {
+#if TS_ALLOC == TS_LOCAL
 #if NEXT_TS
-        uint64_t new_timestamp = timestamp +1;
-#else
-        uint64_t thd_id = timestamp & 0xFF;      // 提取低 8 位的 thd_id
-        uint64_t time = timestamp >> 8;          // 提取高 56 位的 time
-        time += 1;
-        uint64_t new_timestamp = (time << 8) | thd_id;
-#endif
+        uint64_t new_timestamp = glob_manager->get_ts(this->get_thd_id());
         return new_timestamp;
+#else
+        uint64_t new_timestamp = timestamp + 1;
+        return new_timestamp;
+#endif
+#else
+        uint64_t new_timestamp = glob_manager->get_ts(this->get_thd_id());
+        return new_timestamp;
+#endif
     }
+
 #endif
 
     RC              validate();
@@ -451,9 +456,9 @@ inline status_t txn_man::wound_txn(txn_man * txn)
 {
 #if CC_ALG == BAMBOO || CC_ALG == WOUND_WAIT || CC_ALG == REBIRTH_RETIRE
     auto ret = txn->set_abort();
-//#if PF_CS
-//    INC_STATS(this->get_thd_id(), find_circle_abort_depent, 1);
-//#endif
+#if PF_CS
+    INC_STATS(this->get_thd_id(), find_circle_abort_depent, 1);
+#endif
     return ret;
 #else
     return ABORTED;

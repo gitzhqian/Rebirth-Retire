@@ -21,12 +21,25 @@ void Manager::init() {
 		*all_ts[i] = UINT64_MAX;
 		_all_txns[i] = NULL;
 	}
-	for (UInt32 i = 0; i < BUCKET_CNT; i++)
-		pthread_mutex_init( &mutexes[i], NULL );
+	for (UInt32 i = 0; i < BUCKET_CNT; i++) {
+        pthread_mutex_init( &mutexes[i], NULL );
+	}
+    for (int i = 0; i < MAX_THREAD; i++) {
+        timestamps[i] = (padded_uint64_t *)aligned_alloc(64, sizeof(padded_uint64_t));
+        timestamps[i]->value = i;
+    }
 }
-
-uint64_t 
-Manager::get_ts(uint64_t thread_id) {
+uint64_t Manager::get_global_n_ts(uint64_t thread_id){
+    uint64_t max_ts = 0;
+    for (int i = 0; i < MAX_THREAD; i++) {
+        uint64_t ts = timestamps[i]->value;
+        if (ts > max_ts)
+            max_ts = ts;
+    }
+    uint64_t counter = (max_ts >> THREAD_ID_BITS) + 1;
+    return (counter << THREAD_ID_BITS) | thread_id;
+}
+uint64_t Manager::get_ts(uint64_t thread_id) {
 	if (g_ts_batch_alloc)
 		assert(g_ts_alloc == TS_CAS);
 	uint64_t time;
@@ -40,7 +53,7 @@ Manager::get_ts(uint64_t thread_id) {
 	case TS_CAS :
 		if (g_ts_batch_alloc)
 			time = ATOM_FETCH_ADD((*timestamp), g_ts_batch_num);
-		else 
+		else
 			time = ATOM_FETCH_ADD((*timestamp), 1);
 		break;
 	case TS_HW :
@@ -54,6 +67,10 @@ Manager::get_ts(uint64_t thread_id) {
 	case TS_CLOCK :
 		time = get_sys_clock() * g_thread_cnt + thread_id;
 		break;
+    case TS_LOCAL :
+        __sync_fetch_and_add(&timestamps[thread_id]->value, (1ULL << THREAD_ID_BITS));
+        time = timestamps[thread_id]->value;
+        break;
 	default :
 		time = 0; assert(false);
 	}

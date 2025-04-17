@@ -169,13 +169,20 @@ RC thread_t::run() {
         m_txn->set_ts(0);
         m_txn->parents.clear();
 #if CHILDOPT
-        m_txn->children.store(0, std::memory_order_relaxed);
+//        for (auto& slot : m_txn->children_bitmap) {
+//            slot.store(0,memory_order_relaxed );
+//        }
+        m_txn->children_bitmap.fill(0);
 #else
         m_txn->children.clear();
 #endif
         m_txn->timestamp_v = 0;
         m_txn->read_only = false;
         m_txn->is_long = false;
+
+        if (m_query->is_long){
+            m_txn->is_long = true;
+        }
 #endif
 
 #if  CC_ALG == WOUND_WAIT || CC_ALG == BAMBOO || CC_ALG == DL_DETECT || CC_ALG == REBIRTH_RETIRE
@@ -333,6 +340,12 @@ RC thread_t::run() {
                 INC_STATS(get_thd_id(), abort_cnt_neworder, 1);
             }else if(txn_typ == TPCC_PAYMENT){
                 INC_STATS(get_thd_id(), abort_cnt_payment, 1);
+            } else if(txn_typ == TPCC_DELIVERY){
+                INC_STATS(get_thd_id(), abort_cnt_delivery, 1);
+            } else if(txn_typ == TPCC_ORDER_STATUS){
+                INC_STATS(get_thd_id(), abort_cnt_order_status, 1);
+            } else if(txn_typ == TPCC_STOCK_LEVEL){
+                INC_STATS(get_thd_id(), abort_cnt_stock_level, 1);
             }
 #endif
         }
@@ -393,19 +406,7 @@ ts_t thread_t::get_next_ts() {
         }
         return _curr_ts - 1;
     } else {
-#if CC_ALG == REBIRTH_RETIRE
-        #if NEXT_TS
         _curr_ts = glob_manager->get_ts(get_thd_id());
-        #else
-        _curr_ts ++;
-        uint64_t time = _curr_ts;
-        uint64_t thd_id = get_thd_id();
-        uint64_t timestamp = (time << 8) | (thd_id & 0xFF);
-        return timestamp;
-        #endif
-#else
-        _curr_ts = glob_manager->get_ts(get_thd_id());
-#endif
         return _curr_ts;
     }
 }

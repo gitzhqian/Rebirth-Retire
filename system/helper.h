@@ -268,8 +268,18 @@ private:
     uint64_t seed;
 };
 
+#define THREAD_ID_BITS 8
+
 inline void set_affinity(uint64_t thd_id) {
-    return;
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    int num_cores = sysconf(_SC_NPROCESSORS_ONLN); // 获取核心数量
+    CPU_SET(thd_id % num_cores, &cpuset); // 线程 tid 绑定到 tid % 核心数
+    int rc = pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+    if (rc != 0) {
+        fprintf(stderr, "Error calling pthread_setaffinity_np: %d\n", rc);
+    }
+//    return;
     /*
     // TOOD. the following mapping only works for swarm
     // which has 4-socket, 10 physical core per socket,

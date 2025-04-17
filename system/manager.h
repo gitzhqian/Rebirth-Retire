@@ -11,8 +11,9 @@ public:
 	// returns the next timestamp.
 	ts_t			get_ts(uint64_t thread_id);
 	ts_t			get_n_ts(int n); // book n timestamps
+    ts_t			get_global_n_ts(uint64_t thread_id);
 
-	// For MVCC. To calculate the min active ts in the system
+    // For MVCC. To calculate the min active ts in the system
 	void 			add_ts(uint64_t thd_id, ts_t ts);
 	ts_t 			get_min_ts(uint64_t tid = 0);
 
@@ -31,6 +32,7 @@ private:
 	volatile uint64_t * _epoch;		
 	ts_t * 			_last_epoch_update_time;
 
+	padded_uint64_t *timestamps[MAX_THREAD];
 	pthread_mutex_t ts_mutex;
 	uint64_t *		timestamp;
 	pthread_mutex_t mutexes[BUCKET_CNT];

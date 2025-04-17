@@ -4,7 +4,8 @@
   x(double, time_wait) x(double, time_man) x(double, time_index) x(double, time_copy)
 #define ALL_METRICS(x, y, z) \
   y(uint64_t, txn_cnt) y(uint64_t, abort_cnt) y(uint64_t, user_abort_cnt) \
-  y(uint64_t, abort_cnt_neworder) y(uint64_t, abort_cnt_payment)  \
+  y(uint64_t, abort_cnt_neworder) y(uint64_t, abort_cnt_payment)          \
+  y(uint64_t, abort_cnt_delivery) y(uint64_t, abort_cnt_order_status) y(uint64_t, abort_cnt_stock_level)  \
   x(double, run_time) x(double, time_abort) x(double, time_cleanup)       \
   x(double, time_lockrow) x(double, time_exec) x(double, time_assign) x(double, time_rebirth) x(double, time_creat_entry) \
   x(double, time_creat_version) x(double, time_read_write) x(double, time_verify)  \

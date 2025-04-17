@@ -513,6 +513,7 @@ row_t * txn_man::get_row(row_t * row, access_t type) {
 #elif CC_ALG == REBIRTH_RETIRE
     auto res_version = (Version*) accesses[row_cnt - 1]->tuple_version;
     assert(res_version->data != nullptr);
+
     return res_version->data;
 #else
     return accesses[row_cnt - 1]->data;
@@ -833,7 +834,11 @@ void txn_man::release() {
 RC txn_man::validate() {
     for (auto it : node_map) {
         if (IndexMBTree::extract_version(it.first) != it.second) {
+#if WORKLOAD == TPCC && CC_ALG == REBIRTH_RETIRE
+            if (this->is_long) continue;
+#else
             return Abort;
+#endif
         }
     }
     return RCOK;

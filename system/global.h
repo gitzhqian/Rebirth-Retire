@@ -165,7 +165,10 @@ typedef uint64_t txn_t;
 typedef uint64_t rid_t; // row id
 typedef uint64_t pgid_t; // page id
 
-
+typedef struct {
+    uint64_t value;
+    char padding[64];  // 避免伪共享
+} __attribute__((aligned(64))) padded_uint64_t;
 
 /* INDEX */
 enum latch_t {LATCH_EX, LATCH_SH, LATCH_NONE};
@@ -191,20 +194,12 @@ enum status_t: unsigned int {RUNNING, ABORTED, COMMITED,  validating, writing, c
 /* COMMUTATIVE OPERATIONS */
 enum com_t {COM_INC, COM_DEC, COM_NONE};
 
-/* HOTSPOT_FRIENDLY:dependency type */
+/* dependency type */
 enum DepType {
     INVALID = 0,
     READ_WRITE_ = 1,  /* Binary: 001*/
-    WRITE_READ_ = 2,  /* Binary: 010*/
-    WRITE_WRITE_ = 4,  /* Binary: 100*/
-//    RW_WR = 3,  /* Binary: 011*/
-//    RW_WW = 5,  /* Binary: 101*/
-//    WR_WW = 6,  /* Binary: 110*/
-//    RW_WR_WW = 7,  /* Binary: 111*/
-    WRONG = 100,
-    WRONG_1 = 200,
-
-    READ_READ_
+    WRITE_READ_ = 2,  /* Binary: 010*/  /* Binary: 100*/
+    WRITE_WRITE_ = 3
 };
 
 //curr_txn_id, dep_txn_id, dep_type
@@ -220,41 +215,6 @@ extern tbb::concurrent_vector<std::pair<string,  string>> wound_owners_list ;
 extern std::atomic<uint64_t> wound_retire_count;
 extern std::atomic<uint64_t> wound_owner_count;
 extern  std::atomic<uint64_t> one_hot_txn_count;
-
-/* HOTSPOT_FRIENDLY: return type of pushDependency() */
-//enum bool_dep{
-//    NOT_CONTAIN = 0,
-//    CONTAIN_TXN = 1,
-//    CONTAIN_TXN_AND_TYPE = 2
-//};
-
-/* HOTSPOT_FRIENDLY: addable write_set */
-/*
-struct write_set_element {
-    //需要增加一个无参数的构造函数，后续使用 write_set_element 来声明一个新的变量时，会用到这个构造函数的
-    write_set_element() :
-    tuple_version(ItemPointer()),
-    operation_type(RWType::INVALID) {}
-
-    write_set_element(const ItemPointer tuple_version, const RWType operation_type) :
-    tuple_version(tuple_version),
-    operation_type(operation_type) {}
-
-    ItemPointer tuple_version;
-    RWType operation_type;
-
-    //  std::queue<TransactionContext*> dependencies;
-
-    //访问过当前事务修改后的 tuple version 的事务，使用 map 是为了方便判断，这个事务已经访问过这个 tuple version 了
-    tbb::concurrent_unordered_map<uint64_t, TransactionContext*>  dependencies;
-};
-
-typedef tbb::concurrent_unordered_map<uint64_t, write_set_element>  WriteSet_Mix;
-*/
-
-//4-3 Restrict the length of version chain.[Unused]
-//extern uint64_t version_chain_threshold;
-
 
 #define MSG(str, args...) { \
 	printf("[%s : %d] " str, __FILE__, __LINE__, args); } \

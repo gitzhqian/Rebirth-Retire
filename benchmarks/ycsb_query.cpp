@@ -171,21 +171,6 @@ void ycsb_query::gen_requests(uint64_t thd_id, workload * h_wl) {
     drand48_r(&_query_thd->buffer, &temp_hotspot_position);
     hotspot_position = temp_hotspot_position*local_req_per_query;
 
-    double temp_hotspot_position1;
-    int hotspot_position1;
-    drand48_r(&_query_thd->buffer, &temp_hotspot_position1);
-    hotspot_position1 = temp_hotspot_position1*local_req_per_query;
-
-    double temp_hotspot_position2;
-    int hotspot_position2;
-    drand48_r(&_query_thd->buffer, &temp_hotspot_position2);
-    hotspot_position2 = temp_hotspot_position2*local_req_per_query;
-
-    double temp_hotspot_position3;
-    int hotspot_position3;
-    drand48_r(&_query_thd->buffer, &temp_hotspot_position3);
-    hotspot_position3 = temp_hotspot_position3*local_req_per_query;
-
     double random_read_ratio ;
 #if RANDOM_READ_SYNTHETIC_YCSB
     random_read_ratio = (double)(rand() % 100) / 100.0;

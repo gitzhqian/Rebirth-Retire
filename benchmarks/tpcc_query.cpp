@@ -112,7 +112,7 @@ void tpcc_query::gen_new_order(uint64_t thd_id) {
 
     arg.d_id = URand(1, DIST_PER_WARE, arg.w_id-1);
     arg.c_id = NURand(1023, 1, g_cust_per_dist, arg.w_id-1);
-//    rbk = URand(1, 100, arg.w_id-1);
+    arg.rbk = URand(1, 100, arg.w_id-1);
     arg.ol_cnt = URand(5, 15, arg.w_id-1);
 //    ol_cnt = URand(OL_CNT_ST, OL_CNT_ED, w_id-1);
     arg.o_entry_d = 2013;
@@ -123,14 +123,14 @@ void tpcc_query::gen_new_order(uint64_t thd_id) {
 
     for (UInt32 oid = 0; oid < arg.ol_cnt; oid ++) {
         arg.items[oid].ol_i_id = NURand(8191, 1, g_max_items, arg.w_id-1);
-#if TPCC_USER_ABORT
+#if TPCC_USER_ABORT && CC_ALG == BAMBOO
         // XXX(zhihan): 1% of the New-Order transactions are chosen at random to
         // simulate user data entry errors and exercise the performance of
         // rolling back update transactions.
         // If this is the last item on the order and rbk = 1 (chosen from [1,
         // 100]), then the item number is set to an unused value.
-        if ((oid == ol_cnt - 1) && (rbk == 1)) {
-            items[oid].ol_i_id = 0;
+        if ((oid == arg.ol_cnt - 1) && (arg.rbk == 1)) {
+            arg.items[oid].ol_i_id = 0;
         }
 #endif
         UInt32 x = URand(1, 100, arg.w_id-1);
@@ -172,6 +172,7 @@ tpcc_query::gen_order_status(uint64_t thd_id) {
     type = TPCC_ORDER_STATUS;
     readonly = true;
     read_committed = false;
+    is_long = true;
 //    request_cnt = 3;
     tpcc_query_order_status& arg = args.order_status;
 
@@ -214,6 +215,7 @@ void tpcc_query::gen_stock_level(uint64_t thd_id) {
     type = TPCC_STOCK_LEVEL;
     readonly = true;
     read_committed = false;
+    is_long = true;
 //    request_cnt = 2;
     tpcc_query_stock_level& arg = args.stock_level;
 
