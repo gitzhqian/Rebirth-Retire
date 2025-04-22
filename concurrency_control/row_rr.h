@@ -74,13 +74,12 @@ public:
     RC read_committed(txn_man * txn, Version* read_committed,
                       uint32_t prefh_latest_, uint64_t start_r_w, Access * access);
 
-//    volatile bool blatch;
+
     Version *version_header;              // version header of a row's version chain (N2O)
     Version *latest;
     std::list<RRLockEntry *> *wait_list;
-    RRLockEntry * owner;
+    RRLockEntry * owner;                // if rebirth wait, when the owner bring out, it becomes the header
     UInt32 waiter_cnt;
-//    UInt32 retired_cnt;
     uint32_t chain_threshold;
 
     Version **version_prefhs_;
@@ -299,45 +298,35 @@ public:
 
         // remove retired versions
         assert(version_header != nullptr);
-        while (version_header) {
-            // Check conditions for skipping this version
-            if (version_header->type == XP ) {
-                break;
-            }
+        assert(latest->type == XP);
+        while (version_header != nullptr) {
+            if (version_header->type == AT  ) {
+                version_header = version_header->next;
 
-            if (version_header->type == AT ) {
-                // If owner is null or has no access, just remove version header
-                if (owner == nullptr) {
-                    version_header = version_header->next;
-                    if (version_header != nullptr) {
-                        version_header->prev = nullptr;  // Avoid null pointer dereferencing
-                    }
-                } else {
-                    // Otherwise, update the owner's access and remove version header
-                    version_header = version_header->next;
-                    if (version_header != nullptr) {
-                        version_header->prev = nullptr;  // Avoid null pointer dereferencing
-                    }
-                    if (owner->access!= nullptr){
-                        owner->access->tuple_version->next = version_header;
-                    }
+                if (owner == nullptr){
+                    version_header->prev = nullptr;
+                }
+                if (owner != nullptr && owner->access != nullptr && owner->txn->status != ABORTED) {
+                    owner->access->tuple_version->next = version_header;
+                    if (version_header != nullptr)
+                        version_header->prev = owner->access->tuple_version;
                 }
             } else {
-                break; // Exit if conditions are not met for removal
+                break;
             }
         }
 
-//        assert(version_header != nullptr);
         if (version_header == nullptr) {
             version_header = latest;
         }
+
+        assert(version_header != nullptr);
+        assert(latest->type == XP);
+
         return true;
     }
 
     void release_row(access_t type, RRLockEntry * entry, Version * new_version, RC rc, txn_man *curr) {
-#if WAIT_RR
-        owner = nullptr;
-#endif
         if (rc == RCOK){
             if (owner != nullptr){
                 if ( entry->txn->get_thd_id() == owner->txn->get_thd_id()){
@@ -356,6 +345,7 @@ public:
                     bring_out_waiter( entry ) ;
                 }
 
+                assert(new_version != latest);
                 if (new_version != nullptr && new_version->type == WR){
                     new_version->type = AT;
                 }
@@ -406,7 +396,7 @@ public:
         auto wound_header = version_header;
         while (wound_header) {
             if (wound_header->retire == nullptr && wound_header->type == XP) break;
-            if (wound_header->type == AT) {
+            if (wound_header->type == AT || (wound_header->retire!= nullptr && wound_header->retire->status == ABORTED)) {
                 wound_header = wound_header->next;
                 continue;
             }
@@ -422,7 +412,7 @@ public:
         }
 
         if (owner != nullptr && owner->status == LOCK_OWNER) {
-            if (owner->txn != nullptr) {
+            if (owner->txn != nullptr && owner->txn->status != ABORTED) {
                 auto own_ts = owner->txn->get_ts();
                 if (own_ts == 0 || a_higher_than_b(curr_txn->get_ts(), own_ts)) {
                     if (owner->access != nullptr){
@@ -579,15 +569,13 @@ public:
         auto size_dep = lower_than_me.size();
         for (int i = 0; i < size_dep; ++i) {
             auto version_o = lower_than_me[i];
-//            version_o->type = AT;
             auto dep_txn_o = version_o->retire;
-            if (dep_txn_o != nullptr) {
-                curr_txn->wound_txn(dep_txn_o);
-                dep_txn_o->lock_abort = true;
-//#if PF_CS
-//                INC_STATS(curr_txn->get_thd_id(), find_circle_abort_depent, 1);
-//#endif
+            if (dep_txn_o == nullptr || dep_txn_o->status != RUNNING) {
+                continue;
             }
+            curr_txn->wound_txn(dep_txn_o);
+            dep_txn_o->lock_abort = true;
+//            printf("%lu,%lu,%d. \n",curr_txn->get_ts(), dep_txn_o->get_ts(), dep_txn_o->status);
         }
 
         return false;
@@ -598,7 +586,6 @@ public:
 
 private:
 
-//    Version * _write_history; // circular buffer, convert it to the thread class
 
 };
 

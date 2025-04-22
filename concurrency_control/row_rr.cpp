@@ -204,6 +204,29 @@ RC Row_rr::access(txn_man * txn, TsType type, Access * access){
     if (type == R_REQ) {
         txn_man *retire_txn = version_header->retire;
         Version *read_version = version_header;
+#if WAIT_RR
+        if (ts == 0) {
+            if (owner) {
+                auto own_txn = owner->txn;
+                assign_ts(own_txn->get_ts(), own_txn);
+                ts = assign_ts(ts, txn);
+            }
+            ts = assign_ts(ts, txn);
+        }
+
+        if (owner) {
+            if (a_higher_than_b(owner->txn->get_ts(), ts)) {
+                rc = WAIT;
+            } else {
+                access->tuple_version = latest;
+                goto final;
+            }
+        }else{
+            access->tuple_version = latest;
+            bring_next(txn, txn );
+            goto final;
+        }
+#else
         if (owner) {
             auto own_txn = owner->txn;
             auto own_ts = own_txn->get_ts();
@@ -240,6 +263,7 @@ RC Row_rr::access(txn_man * txn, TsType type, Access * access){
                 }
             }
         }
+#endif
 
         if (rc == WAIT){
             assert(ts > 0);
@@ -282,6 +306,36 @@ RC Row_rr::access(txn_man * txn, TsType type, Access * access){
 
         access->tuple_version = read_version;
     }else if (type == P_REQ) {
+#if WAIT_RR
+        if (txn->get_ts() == 0) {
+            if (owner) {
+                assign_ts(owner->txn->get_ts(), owner->txn);
+                ts = assign_ts(ts, txn);
+            }else {
+                ts = assign_ts(ts, txn);
+                if (waiter_cnt <= 0) {
+                    access->old_version = version_header;
+                    new_version->next = version_header;
+                    new_version->retire = txn;
+                    new_version->type = WR;
+                    version_header->prev = new_version;
+                    version_header = new_version;
+                    assert(version_header->end_ts == INF);
+
+                    access->tuple_version = new_version;
+                    entry->type = LOCK_EX;
+                    entry->has_write = true;
+                    entry->status = LOCK_OWNER;
+                    entry->access = access;
+                    entry->txn = txn;
+                    owner = entry;
+
+                    rc = RCOK;
+                    goto final;
+                }
+            }
+        }
+#else
         // no conflict , grab the time, become the owner
         if ((owner == nullptr && (version_header->type == XP || (version_header->retire!= nullptr && version_header->retire->status == validating))) ||
                 (owner != nullptr && owner->txn->status == validating)) {
@@ -307,6 +361,7 @@ RC Row_rr::access(txn_man * txn, TsType type, Access * access){
 
         // has conflict, assign timestamp
         ts = txn->get_ts();
+
         if (ts == 0) {
             std::vector<txn_man *> assign_txns;
             if (owner) {
@@ -339,6 +394,7 @@ RC Row_rr::access(txn_man * txn, TsType type, Access * access){
 
             ts = assign_ts(ts, txn);
         }
+#endif
 
         // detect conflicts, if need to wound or need to rebirth
         wound_rebirth(ts, txn, type);
@@ -351,7 +407,7 @@ RC Row_rr::access(txn_man * txn, TsType type, Access * access){
         new_version->type = WR;
         access->tuple_version = new_version;
 
-        assert(ts > 0);
+        assert(txn->get_ts() > 0);
         rc = WAIT;
         txn->lock_ready = false;
         entry->type = LOCK_EX;
@@ -431,7 +487,7 @@ bool Row_rr::bring_next(txn_man *txn, txn_man *curr) {
                 if (access_version != version_header->prev){
                     if (access_version->type != AT){
                         version_header->prev = access_version;
-                        version_header = access_version;
+                        version_header = access_version;   // become the version header
                     }
                 }
             }
@@ -470,6 +526,18 @@ bool Row_rr::bring_next(txn_man *txn, txn_man *curr) {
                     owner = nullptr;
                     continue;
                 }
+
+#if WAIT_RR
+                has_txn = bring_out_waiter(entry, txn);
+
+                owner->access->old_version = version_header;
+                owner->access->tuple_version->next = version_header;
+                version_header->prev = owner->access->tuple_version;
+                version_header = owner->access->tuple_version;
+                entry->txn->lock_ready = true;
+
+                break;
+#endif
 
                 // add owner depended on the retired tail
                 auto retire_tail = version_header->retire;
@@ -543,7 +611,13 @@ bool Row_rr::bring_next(txn_man *txn, txn_man *curr) {
                 if (entry->access == nullptr || entry->txn == nullptr || entry->txn->lock_abort) {
                     has_txn = false;
                 } else {
+#if WAIT_RR
                     has_txn = bring_out_waiter(entry, txn);
+                    entry->txn->lock_ready = true;
+                    entry->access->tuple_version = version_header;
+#else
+                    has_txn = bring_out_waiter(entry, txn);
+
                     Version *read_version;
                     if (owner){
                         read_version = owner->access->tuple_version;
@@ -576,9 +650,9 @@ bool Row_rr::bring_next(txn_man *txn, txn_man *curr) {
                     }
 
                     en_txn->lock_ready = true;
-
                     entry->access->tuple_version = read_version;
                     assert(read_version != nullptr);
+#endif
                 }
             }
         } else {

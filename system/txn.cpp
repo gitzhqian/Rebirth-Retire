@@ -470,13 +470,13 @@ row_t * txn_man::get_row(row_t * row, access_t type) {
 #if PF_CS
         uint64_t startt = get_sys_clock();
 #endif
-        temp_version->data->copy(row);
+        temp_version->data->copy(row->manager->version_header->data);
 #if PF_CS
         INC_STATS(get_thd_id(), time_copy, get_sys_clock() - startt);
 #endif
 #elif ROLL_BACK && (CC_ALG == DL_DETECT || CC_ALG == NO_WAIT || CC_ALG == WAIT_DIE)
         accesses[row_cnt]->orig_data->table = row->get_table();
-            accesses[row_cnt]->orig_data->copy(row);
+        accesses[row_cnt]->orig_data->copy(row);
 #endif
     }
 

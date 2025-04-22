@@ -58,7 +58,13 @@ RC txn_man::validate_rr(RC rc) {
     this->status = validating;
 
     uint64_t serial_id = 0;
-    serial_id =  this->get_ts() ;
+    serial_id = this->get_ts() ;
+
+#if WAIT_RR
+    if(serial_id == 0){
+        serial_id = glob_manager->get_ts(this->get_thd_id());
+    }
+#else
     if(serial_id == 0){
         // traverse the reads and writes, max of read version and max+1 of write version
         for(int rid = 0; rid < row_cnt; rid++) {
@@ -165,6 +171,8 @@ RC txn_man::validate_rr(RC rc) {
     this->wait_latch_time = this->wait_latch_time + timespan1;
 #endif
 
+#endif
+
     if (rc == Abort || status == ABORTED){
         abort_process(this);
         return Abort;
@@ -198,6 +206,8 @@ RC txn_man::validate_rr(RC rc) {
         auto new_version = accesses[rid]->tuple_version;
         assert(new_version->begin_ts == UINT64_MAX && new_version->retire == this);
         auto old_version = accesses[rid]->old_version;
+#if WAIT_RR
+#else
         if (old_version->type != AT){
             // this is because, when i read the old version, it is validating, has no dependency
             if (serial_id <= old_version->begin_ts){
@@ -213,12 +223,12 @@ RC txn_man::validate_rr(RC rc) {
                 }
             }
         }
-
+#endif
         old_version->end_ts = serial_id;
         new_version->begin_ts = serial_id;
         new_version->retire = nullptr;
         new_version->type = XP;
-        accesses[rid]->orig_row->manager->latest = new_version;
+        accesses[rid]->orig_row->manager->latest = new_version;  // become the latest committed
 
 #if PREFETCH
         accesses[rid]->orig_row->manager->append_version_prefhs(new_version);
@@ -226,6 +236,7 @@ RC txn_man::validate_rr(RC rc) {
 
         auto en = accesses[rid]->lock_entry;
         auto type = accesses[rid]->type;
+        assert( accesses[rid]->orig_row->manager->latest->type == XP);
         accesses[rid]->orig_row->manager->release_row(type, en, nullptr, RCOK, this);
 
         accesses[rid]->orig_row->manager->unlock_row(this);
@@ -270,16 +281,20 @@ void txn_man::abort_process(txn_man * txn ){
         auto en = accesses[rid]->lock_entry;
         auto version = accesses[rid]->tuple_version;
         auto type = accesses[rid]->type;
+        assert(en->type == LOCK_EX);
+        assert(version->type == WR);
         accesses[rid]->orig_row->manager->release_row(type, en, version, Abort, this);
         accesses[rid]->orig_row->manager->unlock_row(txn);
     }
 
+#if WAIT_RR
+#else
 #if CHILDOPT
-    for (int i = 0; i < THREAD_CNT; ++i) {
+    for (uint64_t i = 0; i < THREAD_CNT; ++i) {
         if (children_bitmap[i] == 0)
             continue;
 
-        txn_man *depent_txn = glob_manager->get_txn_man(i);  // ✅ i 是线程 id or txn id
+        txn_man *depent_txn = glob_manager->get_txn_man(i);
         if (!depent_txn || depent_txn->status != RUNNING)
             continue;
 
@@ -307,12 +322,6 @@ void txn_man::abort_process(txn_man * txn ){
     }
 #endif
 
-
-#if PF_CS
-    INC_STATS(txn->get_thd_id(), time_get_cs, get_sys_clock() - release_cs);
-    this->wait_latch_time = this->wait_latch_time + (get_sys_clock() - release_cs);
-#endif
-
     parents.clear();
 #if CHILDOPT
 //    for (auto& slot : children_bitmap) {
@@ -321,6 +330,14 @@ void txn_man::abort_process(txn_man * txn ){
 #else
     children.clear();
 #endif
+#endif
+
+#if PF_CS
+    INC_STATS(txn->get_thd_id(), time_get_cs, get_sys_clock() - release_cs);
+    this->wait_latch_time = this->wait_latch_time + (get_sys_clock() - release_cs);
+#endif
+
+
 }
 
 
@@ -331,7 +348,7 @@ void txn_man::addDependencies(std::unordered_map<uint64_t, std::set<uint64_t>*> 
 
     auto get_direct_dependents = [&](txn_man *base_txn) {
         std::vector<uint64_t> result;
-        for (size_t i = 0; i < THREAD_CNT; ++i) {
+        for (uint64_t i = 0; i < THREAD_CNT; ++i) {
             if (children_bitmap[i]  == 1) {
                 result.push_back(i);  //  保存 set 位的 index（比如 thread_id）
             }

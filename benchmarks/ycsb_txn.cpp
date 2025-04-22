@@ -156,25 +156,19 @@ RC ycsb_txn_man::run_txn(base_query * query) {
                 }
             }
             #else
-            if (finish_req && (req->rtype == WR)) {
-                if (this->lock_abort || this->status == ABORTED){
-                    rc = Abort;
-                    goto final;
-                }else{
-#if WAIT_RR
-//                    tmp_retire.push_back(access_id);
-//                    retire_row(rid);
-                    row_t *rw = accesses[access_id]->orig_row;
-                    RRLockEntry *lr = accesses[access_id]->lock_entry;
-                    tmp_retire.push_back(rw);
-                    tmp_locks.push_back(lr);
-#else
-                    if (retire_row(access_id) == Abort) {
-                        return finish(Abort);
+                #if WAIT_RR
+                #else
+                    if (finish_req && (req->rtype == WR)) {
+                        if (this->lock_abort || this->status == ABORTED){
+                            rc = Abort;
+                            goto final;
+                        }else{
+                            if (retire_row(access_id) == Abort) {
+                                return finish(Abort);
+                            }
+                        }
                     }
-#endif
-                }
-            }
+                #endif
             #endif
 #endif
 
@@ -192,19 +186,8 @@ RC ycsb_txn_man::run_txn(base_query * query) {
     rc = RCOK;
     final:
 
-//#if CC_ALG == REBIRTH_RETIRE && WAIT_RR
-//    for (int i = 0; i < tmp_retire.size(); ++i) {
-//        auto retire_row = tmp_retire[i];
-//        if (retire_row->retire_row(tmp_locks[i]) == Abort) {
-//            return finish(Abort);
-//        }
-//    }
-//
-//#endif
-
 #if CC_ALG == REBIRTH_RETIRE
     if (rc == RCOK){
-//        printf("ycsb final rc: %d. \n",rc);
        ATOM_CAS(status, RUNNING, validating);
     }
     if (rc == Abort) {
